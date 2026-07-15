@@ -5,7 +5,6 @@ const {
 const http = require('http');
 require('dotenv').config();
 
-// Render'ı aktif tutmak için
 http.createServer((req, res) => {
     res.writeHead(200);
     res.end('Bot aktif!');
@@ -17,15 +16,14 @@ const client = new Client({
         GatewayIntentBits.GuildMessages, 
         GatewayIntentBits.MessageContent, 
         GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.DirectMessages // DM'leri okuyabilmesi için ZORUNLU
+        GatewayIntentBits.DirectMessages 
     ],
     partials: [
-        Partials.Channel, // DM kanallarını önbelleğe almadan okuyabilmesi için ZORUNLU
+        Partials.Channel, 
         Partials.Message
     ]
 });
 
-// Veritabanı (Sunucu ID -> Yasaklı Kelimeler Listesi)
 const serverBannedWords = new Map();
 
 client.once('ready', () => {
@@ -35,53 +33,54 @@ client.once('ready', () => {
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
 
-    // --- /help KOMUTU ---
-    if (message.content === '/help') {
+    // 🔍 GİZLİ RADAR: Botun Dm'leri duyup duymadığını Render panelinde (Logs) görmek için
+    if (message.channel.type === ChannelType.DM) {
+        console.log(`[DM ALINDI] Kimden: ${message.author.username} | Mesaj: ${message.content}`);
+    }
+
+    const icerik = message.content.trim().toLowerCase(); // Boşlukları sil ve küçük harfe çevir
+
+    // --- /help veya !help KOMUTU ---
+    if (icerik === '/help' || icerik === '!help') {
         const helpEmbed = new EmbedBuilder()
             .setTitle('✨ Evo-Bot Yardım Merkezi ✨')
-            .setColor(0x2b2d31) // Modern Koyu Gri Rengi
+            .setColor(0x2b2d31)
             .setDescription('Aşağıdaki komutları kullanarak botu yönetebilirsiniz.')
             .addFields(
-                { name: '🛠️ `/help`', value: 'Bu yardım menüsünü görüntüler.', inline: false },
-                { name: '📊 `/dashboard`', value: 'Botun sistem durumunu ve geliştirici bilgilerini gösterir.', inline: false },
-                { name: '🛡️ `/setup`', value: '*(Sadece DM)* Sunucun için kelime engelleyiciyi kurar.', inline: false }
+                { name: '🛠️ `!help`', value: 'Bu yardım menüsünü görüntüler.', inline: false },
+                { name: '📊 `!dashboard`', value: 'Botun sistem durumunu ve bilgilerini gösterir.', inline: false },
+                { name: '🛡️ `!setup`', value: '*(Sadece DM)* Sunucun için kelime engelleyiciyi kurar.', inline: false }
             )
             .setThumbnail(client.user.displayAvatarURL())
             .setFooter({ text: 'Rizza ve Emoc tarafından gururla geliştirildi.', iconURL: message.author.displayAvatarURL() })
             .setTimestamp();
-        
         message.reply({ embeds: [helpEmbed] });
     }
 
-    // --- /dashboard KOMUTU ---
-    if (message.content === '/dashboard') {
+    // --- /dashboard veya !dashboard KOMUTU ---
+    if (icerik === '/dashboard' || icerik === '!dashboard') {
         const dashboardEmbed = new EmbedBuilder()
             .setTitle('🚀 Sistem Kontrol Paneli')
-            .setColor(0x5865F2) // Discord Mavi/Mor Rengi
+            .setColor(0x5865F2)
             .setThumbnail(client.user.displayAvatarURL())
-            .setDescription(`Merhaba, ben **${client.user.username}**! Sistemlerim şu an stabil çalışıyor.`)
+            .setDescription(`Merhaba, ben **${client.user.username}**! Sistemlerim stabil çalışıyor.`)
             .addFields(
                 { name: '📡 Gecikme', value: `${client.ws.ping}ms`, inline: true },
                 { name: '⏱️ Durum', value: '7/24 Aktif', inline: true },
-                { name: '🛡️ Korunan Sunucular', value: `${client.guilds.cache.size} Sunucu`, inline: true },
+                { name: '🛡️ Sunucular', value: `${client.guilds.cache.size} Sunucu`, inline: true },
                 { name: '👑 Geliştiriciler', value: 'Rizza ve Emoc', inline: false }
             )
             .setFooter({ text: 'Render & GitHub üzerinden desteklenmektedir.' })
             .setTimestamp();
-            
         message.reply({ embeds: [dashboardEmbed] });
     }
 
-    // --- /setup KOMUTU (DM'den) ---
-    if (message.channel.type === ChannelType.DM && message.content === '/setup') {
+    // --- /setup veya !setup KOMUTU (DM'den) ---
+    if (message.channel.type === ChannelType.DM && (icerik === '/setup' || icerik === '!setup')) {
         const guilds = client.guilds.cache.filter(g => g.ownerId === message.author.id);
         
         if (guilds.size === 0) {
-            const errorEmbed = new EmbedBuilder()
-                .setColor(0xED4245) // Kırmızı
-                .setTitle('❌ Hata')
-                .setDescription('Sahibi olduğun ve benim de bulunduğum bir sunucu bulamadım. Lütfen önce beni sunucuna davet et!');
-            return message.reply({ embeds: [errorEmbed] });
+            return message.reply({ embeds: [new EmbedBuilder().setColor(0xED4245).setTitle('❌ Hata').setDescription('Sahibi olduğun ve benim de bulunduğum bir sunucu bulamadım. Önce beni sunucuna davet et!')] });
         }
 
         const select = new StringSelectMenuBuilder()
@@ -92,16 +91,13 @@ client.on('messageCreate', async (message) => {
             select.addOptions(new StringSelectMenuOptionBuilder().setLabel(g.name).setValue(g.id).setEmoji('📌'));
         });
 
-        const row = new ActionRowBuilder().addComponents(select);
-        
         const setupEmbed = new EmbedBuilder()
             .setTitle('⚙️ Kelime Engelleyici Kurulumu')
-            .setColor(0xFEE75C) // Sarı
-            .setDescription('Lütfen aşağıdan kelime engelleme sistemini aktif etmek istediğin sunucuyu seç.');
+            .setColor(0xFEE75C)
+            .setDescription('Aşağıdan kelime engelleme sistemini aktif etmek istediğin sunucuyu seç.');
 
-        const setupMsg = await message.reply({ embeds: [setupEmbed], components: [row] });
+        const setupMsg = await message.reply({ embeds: [setupEmbed], components: [new ActionRowBuilder().addComponents(select)] });
 
-        // Kelime seçim kolektörü
         const collector = setupMsg.createMessageComponentCollector({ componentType: ComponentType.StringSelect, time: 60000 });
         
         collector.on('collect', async (interaction) => {
@@ -110,12 +106,7 @@ client.on('messageCreate', async (message) => {
             const guildId = interaction.values[0];
             const guildName = client.guilds.cache.get(guildId).name;
             
-            const step2Embed = new EmbedBuilder()
-                .setTitle('📝 Kelime Belirleme')
-                .setColor(0x57F287) // Yeşil
-                .setDescription(`**${guildName}** sunucusu seçildi!\n\nLütfen yasaklamak istediğin kelimeyi (tek kelime) buraya yaz. *(Süren 30 saniye)*`);
-
-            await interaction.reply({ embeds: [step2Embed] });
+            await interaction.reply({ embeds: [new EmbedBuilder().setTitle('📝 Kelime Belirleme').setColor(0x57F287).setDescription(`**${guildName}** seçildi!\n\nYasaklamak istediğin kelimeyi (tek kelime) buraya yaz. *(30 saniye)*`)] });
             
             const filter = m => m.author.id === message.author.id;
             const collected = await message.channel.awaitMessages({ filter, max: 1, time: 30000 });
@@ -126,12 +117,7 @@ client.on('messageCreate', async (message) => {
                 list.push(word);
                 serverBannedWords.set(guildId, list);
                 
-                const successEmbed = new EmbedBuilder()
-                    .setTitle('✅ Kurulum Tamamlandı')
-                    .setColor(0x57F287)
-                    .setDescription(`Harika! Artık **${guildName}** sunucusunda \`${word}\` kelimesi kullanıldığında mesaj silinecek ve kullanıcıya uyarı DM'i gönderilecek.`);
-                
-                message.channel.send({ embeds: [successEmbed] });
+                message.channel.send({ embeds: [new EmbedBuilder().setTitle('✅ Başarılı').setColor(0x57F287).setDescription(`**${guildName}** sunucusunda \`${word}\` kelimesi yasaklandı!`)] });
             }
         });
     }
@@ -145,14 +131,7 @@ client.on('messageCreate', async (message) => {
             const word = bannedWords.find(w => content.includes(w));
             await message.delete().catch(() => {});
             
-            const warningEmbed = new EmbedBuilder()
-                .setTitle('⚠️ Uyarı: Yasaklı Kelime Kullanımı')
-                .setColor(0xED4245)
-                .setDescription(`**${message.guild.name}** sunucusunda yasaklı bir kelime kullandığın için mesajın silindi.`)
-                .addFields({ name: 'Engellenen Kelime', value: `\`${word}\``, inline: true })
-                .setTimestamp();
-                
-            message.author.send({ embeds: [warningEmbed] }).catch(() => {});
+            message.author.send({ embeds: [new EmbedBuilder().setTitle('⚠️ Uyarı: Yasaklı Kelime').setColor(0xED4245).setDescription(`**${message.guild.name}** sunucusunda yasaklı bir kelime (\`${word}\`) kullandığın için mesajın silindi.`).setTimestamp()] }).catch(() => {});
         }
     }
 });
