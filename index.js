@@ -29,7 +29,7 @@ client.on('messageCreate', async (message) => {
 
     if (message.content === '!ping') {
         const { error } = await supabase
-            .from('logs')
+            .from('loogs')
             .insert([{ user: message.author.username, message: 'ping komutu kullanıldı' }]);
 
         if (error) {
