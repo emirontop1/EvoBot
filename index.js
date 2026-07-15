@@ -6,7 +6,6 @@ const {
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType, getVoiceConnection } = require('@discordjs/voice');
 const prism = require('prism-media');
 const ffmpegPath = require('ffmpeg-static');
-const youtubedl = require('youtube-dl-exec');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
@@ -14,7 +13,7 @@ const crypto = require('crypto');
 require('dotenv').config();
 
 // ==========================================
-// YT-AUDIO-API (BOT İÇİNE ENTEGRE - TEK DOSYA)
+// YT-AUDIO-API (INVIDIOUS TABANLI)
 // ==========================================
 const API_PORT = process.env.API_PORT || 3001;
 const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
@@ -53,7 +52,89 @@ function cleanupExpiredFiles() {
 // Periyodik temizlik (her 5 dakika)
 setInterval(cleanupExpiredFiles, 5 * 60 * 1000);
 
+// ==========================================
+// INVIDIOUS API FONKSİYONLARI
+// ==========================================
+const INVIDIOUS_INSTANCES = [
+    'https://invidious.projectsegfau.lt',
+    'https://inv.tux.pizza',
+    'https://invidious.drgns.space',
+    'https://inv.nadeko.net',
+    'https://invidious.nerdvpn.de',
+    'https://invidious.tiekoetter.com'
+];
+
+async function fetchWithTimeout(url, ms = 15000) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), ms);
+    try {
+        return await fetch(url, { 
+            signal: controller.signal,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+        });
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+async function getVideoInfo(videoId) {
+    let lastError;
+    for (const instance of INVIDIOUS_INSTANCES) {
+        try {
+            const url = `${instance}/api/v1/videos/${videoId}`;
+            const res = await fetchWithTimeout(url);
+            if (!res.ok) continue;
+            const data = await res.json();
+            if (data.error) continue;
+            
+            // Ses formatlarını bul
+            const audioFormats = (data.adaptiveFormats || [])
+                .filter(f => f.type && f.type.startsWith('audio/mp4') || f.type?.startsWith('audio/webm'));
+            
+            if (audioFormats.length === 0) continue;
+            
+            // En yüksek bitrate'li sesi seç
+            audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+            
+            return {
+                title: data.title || 'Bilinmeyen Şarkı',
+                audioUrl: audioFormats[0].url,
+                duration: data.lengthSeconds,
+                thumbnail: data.videoThumbnails?.[0]?.url || null
+            };
+        } catch (e) {
+            lastError = e;
+            console.error(`[INVIDIOUS] ${instance} başarısız:`, e.message);
+        }
+    }
+    throw lastError || new Error('Tüm Invidious sunucuları başarısız');
+}
+
+async function searchVideo(query) {
+    let lastError;
+    for (const instance of INVIDIOUS_INSTANCES) {
+        try {
+            const url = `${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=video&sort=relevance`;
+            const res = await fetchWithTimeout(url);
+            if (!res.ok) continue;
+            const data = await res.json();
+            if (!data || data.length === 0) continue;
+            
+            const video = data[0];
+            return video.videoId;
+        } catch (e) {
+            lastError = e;
+            console.error(`[INVIDIOUS SEARCH] ${instance} başarısız:`, e.message);
+        }
+    }
+    throw lastError || new Error('Arama sonucu bulunamadı');
+}
+
+// ==========================================
 // EXPRESS API SUNUCUSU (BOT İÇİNDE)
+// ==========================================
 const apiApp = express();
 
 apiApp.get('/', async (req, res) => {
@@ -63,29 +144,58 @@ apiApp.get('/', async (req, res) => {
     }
 
     try {
+        // YouTube video ID'sini çıkar
+        let videoId = url;
+        const idMatch = url.match(/(?:v=|\/)([a-zA-Z0-9_-]{11})/);
+        if (idMatch) {
+            videoId = idMatch[1];
+        } else {
+            // YouTube linki değilse arama yap
+            videoId = await searchVideo(url);
+        }
+
+        // Video bilgilerini al
+        const info = await getVideoInfo(videoId);
+        if (!info || !info.audioUrl) {
+            throw new Error('Ses akışı bulunamadı');
+        }
+
         const token = generateToken();
         const filename = `${token}.mp3`;
         const filePath = path.join(DOWNLOAD_DIR, filename);
 
-        // YouTube'dan ses indir - DOĞRUDAN yt-dlp ile
-        await youtubedl(url, {
-            extractAudio: true,
-            audioFormat: 'mp3',
-            audioQuality: 192,
-            output: filePath,
-            noCheckCertificates: true,
-            noWarnings: true,
-            preferFreeFormats: true,
-            addHeader: [
-                'referer:https://www.youtube.com',
-                'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            ]
+        // Ses dosyasını indir
+        const audioRes = await fetchWithTimeout(info.audioUrl);
+        if (!audioRes.ok) throw new Error(`İndirme hatası: ${audioRes.status}`);
+        
+        const buffer = await audioRes.arrayBuffer();
+        
+        // FFmpeg ile MP3'e dönüştür
+        const tempPath = filePath + '.temp';
+        fs.writeFileSync(tempPath, Buffer.from(buffer));
+        
+        await new Promise((resolve, reject) => {
+            const { spawn } = require('child_process');
+            const ffmpeg = spawn(ffmpegPath, [
+                '-i', tempPath,
+                '-acodec', 'libmp3lame',
+                '-ab', '192k',
+                '-ar', '44100',
+                '-ac', '2',
+                filePath
+            ]);
+            
+            ffmpeg.on('close', (code) => {
+                if (code === 0) {
+                    fs.unlinkSync(tempPath);
+                    resolve();
+                } else {
+                    reject(new Error('FFmpeg dönüştürme hatası'));
+                }
+            });
+            
+            ffmpeg.on('error', reject);
         });
-
-        // Dosya oluştu mu kontrol et
-        if (!fs.existsSync(filePath)) {
-            throw new Error('Dosya oluşturulamadı');
-        }
 
         // Token'ı kaydet
         tokens.set(token, {
@@ -94,7 +204,11 @@ apiApp.get('/', async (req, res) => {
             createdAt: Date.now()
         });
 
-        res.json({ token: token });
+        res.json({ 
+            token: token,
+            title: info.title,
+            duration: info.duration
+        });
 
     } catch (error) {
         console.error('[API] Hata:', error);
@@ -128,6 +242,7 @@ apiApp.get('/download', (req, res) => {
 // API sunucusunu başlat
 apiApp.listen(API_PORT, '0.0.0.0', () => {
     console.log(`[API] YouTube Audio API ${API_PORT} portunda başlatıldı.`);
+    console.log(`[API] Invidious sunucuları: ${INVIDIOUS_INSTANCES.length} adet`);
 });
 
 // ==========================================
@@ -137,7 +252,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-    res.send('EvoBot 7/24 Aktif! YouTube Audio API entegre.');
+    res.send('EvoBot 7/24 Aktif! Invidious tabanlı YouTube Audio API entegre.');
 });
 
 app.listen(PORT, '0.0.0.0', () => {
@@ -192,6 +307,26 @@ client.on(Events.GuildMemberAdd, async (member) => {
 });
 
 // ==========================================
+// YARDIMCI FONKSİYONLAR
+// ==========================================
+function createFfmpegAudioStream(audioUrl) {
+    return new prism.FFmpeg({
+        command: ffmpegPath,
+        args: [
+            '-reconnect', '1',
+            '-reconnect_streamed', '1',
+            '-reconnect_delay_max', '5',
+            '-i', audioUrl,
+            '-analyzeduration', '0',
+            '-loglevel', '0',
+            '-f', 's16le',
+            '-ar', '48000',
+            '-ac', '2',
+        ],
+    });
+}
+
+// ==========================================
 // MESAJ YAKALAYICI
 // ==========================================
 client.on(Events.MessageCreate, async (message) => {
@@ -243,7 +378,7 @@ client.on(Events.MessageCreate, async (message) => {
                     { name: '⏱️ Durum', value: '7/24 Aktif', inline: true },
                     { name: '🛡️ Sunucular', value: `${client.guilds.cache.size} Sunucu`, inline: true },
                     { name: '👑 Geliştiriciler', value: 'Rizza ve Emoc', inline: false },
-                    { name: '🎵 Müzik Sistemi', value: 'Entegre (YouTube Audio API)', inline: false }
+                    { name: '🎵 Müzik Sistemi', value: 'Invidious API (Entegre)', inline: false }
                 )
                 .setFooter({ text: 'GitHub & Render Entegrasyonu' })
                 .setTimestamp();
@@ -291,7 +426,7 @@ client.on(Events.MessageCreate, async (message) => {
         }
 
         // ==========================================
-        // 2. MÜZİK SİSTEMİ (TAMAMEN ENTEGRE)
+        // 2. MÜZİK SİSTEMİ (INVIDIOUS TABANLI)
         // ==========================================
 
         if (command === '!spawn') {
@@ -315,9 +450,9 @@ client.on(Events.MessageCreate, async (message) => {
                     adapterCreator: message.guild.voiceAdapterCreator,
                 });
 
-                const loadingMsg = await message.reply("🔎 YouTube'dan ses alınıyor ve MP3'e dönüştürülüyor...");
+                const loadingMsg = await message.reply("🔎 Invidious üzerinden şarkı aranıyor ve dönüştürülüyor...");
 
-                // API'ye istek at (localhost:3001)
+                // API'ye istek at
                 const apiUrl = `http://localhost:${API_PORT}/?url=${encodeURIComponent(query)}`;
                 const tokenRes = await fetch(apiUrl);
                 const data = await tokenRes.json();
@@ -327,18 +462,7 @@ client.on(Events.MessageCreate, async (message) => {
                 }
 
                 const audioUrl = `http://localhost:${API_PORT}/download?token=${data.token}`;
-
-                // Başlık bilgisini al
-                let title = query;
-                if (query.includes('youtube.com') || query.includes('youtu.be')) {
-                    title = 'YouTube Şarkısı';
-                } else if (query.includes('spotify.com')) {
-                    try {
-                        const spotifyRes = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(query)}`);
-                        const spotifyData = await spotifyRes.json();
-                        title = spotifyData.title || 'Spotify Şarkısı';
-                    } catch {}
-                }
+                const title = data.title || query;
 
                 const ffmpegStream = createFfmpegAudioStream(audioUrl);
                 const resource = createAudioResource(ffmpegStream, { inputType: StreamType.Raw });
@@ -356,13 +480,16 @@ client.on(Events.MessageCreate, async (message) => {
                     connection.destroy();
                 });
 
+                const duration = data.duration ? formatDuration(data.duration) : 'Bilinmiyor';
+
                 const playEmbed = new EmbedBuilder()
                     .setTitle('🎶 Müzik Başladı!')
                     .setColor(0x5865F2)
                     .setDescription(`**[${title}](${query})**`)
                     .addFields(
                         { name: 'Kanal', value: `${voiceChannel.name}`, inline: true },
-                        { name: 'Kaynak', value: 'YouTube Audio API (Entegre)', inline: true }
+                        { name: 'Süre', value: duration, inline: true },
+                        { name: 'Kaynak', value: 'Invidious API (Entegre)', inline: true }
                     )
                     .setFooter({ text: `İsteyen: ${message.author.tag}`, iconURL: message.author.displayAvatarURL() })
                     .setTimestamp();
@@ -568,23 +695,13 @@ client.on(Events.MessageCreate, async (message) => {
 });
 
 // ==========================================
-// YARDIMCI FONKSİYONLAR
+// YARDIMCI FONKSİYONLAR (DEVAM)
 // ==========================================
-function createFfmpegAudioStream(audioUrl) {
-    return new prism.FFmpeg({
-        command: ffmpegPath,
-        args: [
-            '-reconnect', '1',
-            '-reconnect_streamed', '1',
-            '-reconnect_delay_max', '5',
-            '-i', audioUrl,
-            '-analyzeduration', '0',
-            '-loglevel', '0',
-            '-f', 's16le',
-            '-ar', '48000',
-            '-ac', '2',
-        ],
-    });
+function formatDuration(seconds) {
+    if (!seconds) return 'Bilinmiyor';
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
 client.login(process.env.DISCORD_TOKEN);
