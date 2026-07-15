@@ -417,4 +417,36 @@ client.on(Events.MessageCreate, async (message) => {
             });
         }
 
-        // =======================
+        // ==========================================
+        // 5. KÜFÜR ENGELLEME RADARI
+        // ==========================================
+
+        if (message.guild && serverBannedWords.has(message.guild.id)) {
+            const bannedWords = serverBannedWords.get(message.guild.id);
+            const content = message.content.toLowerCase();
+
+            if (bannedWords.some(word => content.includes(word))) {
+                const word = bannedWords.find(w => content.includes(w));
+                await message.delete().catch(() => {});
+
+                message.author.send({ embeds: [new EmbedBuilder().setTitle('⚠️ Uyarı: Yasaklı Kelime').setColor(0xED4245).setDescription(`**${message.guild.name}** sunucusunda yasaklı bir kelime (\`${word}\`) kullandığın için mesajın silindi.`).setTimestamp()] }).catch(() => {});
+
+                const filterLog = new EmbedBuilder()
+                    .setTitle('🛡️ Yasaklı Kelime Engellendi')
+                    .setColor(0xED4245)
+                    .addFields(
+                        { name: 'Kullanıcı', value: `${message.author} (${message.author.id})`, inline: true },
+                        { name: 'Kanal', value: `${message.channel}`, inline: true },
+                        { name: 'Engellenen Kelime', value: `\`${word}\``, inline: false },
+                        { name: 'Tam Mesaj', value: `\`\`\`${message.content}\`\`\`` }
+                    )
+                    .setTimestamp();
+                sendToLogs(message.guild, filterLog);
+            }
+        }
+    } catch (topLevelErr) {
+        console.error('[MESSAGE HANDLER ERROR]', topLevelErr);
+    }
+});
+
+client.login(process.env.DISCORD_TOKEN);
