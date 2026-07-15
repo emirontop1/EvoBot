@@ -13,33 +13,41 @@ require('dotenv').config();
 // ==========================================
 // WARP VPN (Cloudflare WARP) PROXY AYARI
 // ==========================================
-// WARP-CLI kullanarak oluşturduğunuz yerel SOCKS5 proxy adresiniz.
-// Eğer .env dosyanızda WARP_PROXY belirtilmişse onu alır, yoksa varsayılan WARP portunu dener.
 const WARP_PROXY_URL = process.env.WARP_PROXY || 'socks5://127.0.0.1:40000';
 
 // ==========================================
-// ÖNEMLİ: Discord Developer Portal -> Bot sekmesinde
-// "MESSAGE CONTENT INTENT" ve "SERVER MEMBERS INTENT"
-// açık olmalı, yoksa aşağıdaki kod hiç çalışmaz.
+// MÜZİK KAYNAĞI 1 (BİRİNCİL): yt-dlp
 // ==========================================
-
-// ==========================================
-// MÜZİK KAYNAĞI 1 (BİRİNCİL): yt-dlp + WARP VPN
-// ==========================================
-async function getAudioViaYtDlp(query) {
-    const isUrl = /^https?:\/\//.test(query);
-    const target = isUrl ? query : `ytsearch1:${query}`;
-
-    // WARP VPN ayarı burada `proxy` parametresi ile YouTube'a istek atarken kullanılıyor.
-    const output = await youtubedl(target, {
+async function executeYtDlp(target, useProxy) {
+    const options = {
         dumpSingleJson: true,
         noCheckCertificates: true,
         noWarnings: true,
         preferFreeFormats: true,
         format: 'bestaudio/best',
-        proxy: WARP_PROXY_URL, 
         addHeader: ['referer:youtube.com', 'user-agent:googlebot']
-    });
+    };
+
+    if (useProxy) {
+        options.proxy = WARP_PROXY_URL;
+    }
+
+    return await youtubedl(target, options);
+}
+
+async function getAudioViaYtDlp(query) {
+    const isUrl = /^https?:\/\//.test(query);
+    const target = isUrl ? query : `ytsearch1:${query}`;
+    let output;
+
+    try {
+        // Önce WARP VPN ile dene
+        output = await executeYtDlp(target, true);
+    } catch (proxyError) {
+        console.error(`[YT-DLP] Proxy başarısız oldu (${proxyError.message}). Proxy'siz deneniyor...`);
+        // Proxy yoksa veya çöktüyse normal bağlantıyı dene
+        output = await executeYtDlp(target, false);
+    }
 
     const info = (output && Array.isArray(output.entries)) ? output.entries[0] : output;
     if (!info || !info.url) throw new Error('yt-dlp ses akışı bulamadı.');
@@ -63,7 +71,11 @@ async function getAudioViaYtDlp(query) {
 let cachedInstances = null;
 let cachedInstancesTime = 0;
 
+// Genişletilmiş ve güncel Invidious sunucu listesi (HTTP 502 almamak için)
 const FALLBACK_INSTANCES = [
+    'https://invidious.flokinet.to',
+    'https://inv.tux.pizza',
+    'https://invidious.lidarshield.cloud',
     'https://inv.nadeko.net',
     'https://invidious.nerdvpn.de',
     'https://yt.chocolatemoo53.com',
@@ -71,7 +83,7 @@ const FALLBACK_INSTANCES = [
     'https://inv.thepixora.com'
 ];
 
-async function fetchWithTimeout(url, ms = 80000) {
+async function fetchWithTimeout(url, ms = 20000) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), ms);
     try {
@@ -92,7 +104,7 @@ async function getInvidiousInstances() {
             .filter(([, info]) => info.type === 'https' && info.api === true && info.uri)
             .map(([, info]) => info.uri);
         if (healthy.length > 0) {
-            cachedInstances = [...new Set([...healthy.slice(0, 6), ...FALLBACK_INSTANCES])];
+            cachedInstances = [...new Set([...healthy.slice(0, 10), ...FALLBACK_INSTANCES])];
             cachedInstancesTime = Date.now();
             return cachedInstances;
         }
@@ -113,7 +125,7 @@ async function withInvidiousFallback(taskFn) {
             lastError = e;
         }
     }
-    throw lastError || new Error('Hiçbir Invidious sunucusuna ulaşılamadı.');
+    throw lastError || new Error('Hiçbir Invidious sunucusuna ulaşılamadı veya sunucular HTTP 502/503 hatası veriyor.');
 }
 
 function extractYoutubeId(url) {
@@ -181,7 +193,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-    res.send('EvoBot 7/24 Aktif! WARP VPN Koruması Devrede.');
+    res.send('EvoBot 7/24 Aktif! Üç Kademeli Bağlantı Sistemi Devrede.');
 });
 
 app.listen(PORT, () => {
@@ -325,7 +337,7 @@ client.on(Events.MessageCreate, async (message) => {
         }
 
         // ==========================================
-        // 2. MÜZİK SİSTEMİ
+        // 2. MÜZİK SİSTEMİ 
         // ==========================================
 
         if (command === '!spawn') {
@@ -349,7 +361,7 @@ client.on(Events.MessageCreate, async (message) => {
                     adapterCreator: message.guild.voiceAdapterCreator,
                 });
 
-                const loadingMsg = await message.reply("🔎 Şarkı aranıyor ve WARP VPN üzerinden yükleniyor, lütfen bekleyin...");
+                const loadingMsg = await message.reply("🔎 Şarkı aranıyor ve yükleniyor, lütfen bekleyin...");
 
                 let searchQuery = query;
 
@@ -364,7 +376,7 @@ client.on(Events.MessageCreate, async (message) => {
                 try {
                     audioInfo = await getAudioViaYtDlp(ytDlpQuery);
                 } catch (ytdlpErr) {
-                    console.error(`[YT-DLP] başarısız, Invidious'a düşülüyor: ${ytdlpErr.message}`);
+                    console.error(`[YT-DLP] Tamamen başarısız, Invidious'a düşülüyor: ${ytdlpErr.message}`);
                     audioInfo = await withInvidiousFallback(async (instance) => {
                         if (ytId) {
                             return await getInvidiousAudioInfo(instance, ytId);
@@ -456,6 +468,7 @@ client.on(Events.MessageCreate, async (message) => {
             setTimeout(() => successMsg.delete().catch(() => {}), 3000);
             return;
         }
+
         if (command === '!kick') {
             if (message.channel.type === ChannelType.DM) return;
             if (!message.member.permissions.has(PermissionsBitField.Flags.KickMembers)) {
@@ -552,7 +565,7 @@ client.on(Events.MessageCreate, async (message) => {
                     await interaction.reply({ embeds: [new EmbedBuilder().setTitle('📝 Kelime Belirleme').setColor(0x57F287).setDescription(`**${guildName}** seçildi!\n\nLütfen yasaklamak istediğin kelimeyi (tek kelime) buraya yaz. *(30 saniye)*`)] });
 
                     const filter = m => m.author.id === message.author.id;
-                    const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 30000 });
+                    const collected = await message.channel.awaitMessages({ filter, max: 1, time: 30000 });
 
                     if (collected.size > 0) {
                         const word = collected.first().content.toLowerCase();
@@ -560,9 +573,9 @@ client.on(Events.MessageCreate, async (message) => {
                         if (!list.includes(word)) list.push(word);
                         serverBannedWords.set(guildId, list);
 
-                        interaction.channel.send({ embeds: [new EmbedBuilder().setTitle('✅ Başarılı').setColor(0x57F287).setDescription(`**${guildName}** sunucusunda \`${word}\` kelimesi başarıyla yasaklandı!`)] });
+                        message.channel.send({ embeds: [new EmbedBuilder().setTitle('✅ Başarılı').setColor(0x57F287).setDescription(`**${guildName}** sunucusunda \`${word}\` kelimesi başarıyla yasaklandı!`)] });
                     } else {
-                        interaction.channel.send('⏱️ Süre doldu, kelime alınamadı.');
+                        message.channel.send('⏱️ Süre doldu, kelime alınamadı.');
                     }
                 } catch (err) {
                     console.error('[SETUP COLLECTOR]', err);
