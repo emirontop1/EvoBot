@@ -6,8 +6,129 @@ const {
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType, getVoiceConnection } = require('@discordjs/voice');
 const prism = require('prism-media');
 const ffmpegPath = require('ffmpeg-static');
+const youtubedl = require('youtube-dl-exec');
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 require('dotenv').config();
+
+// ==========================================
+// YT-AUDIO-API (BOT İÇİNE ENTEGRE - TEK DOSYA)
+// ==========================================
+const API_PORT = process.env.API_PORT || 3001;
+const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
+const TOKEN_EXPIRY = 5 * 60 * 1000; // 5 dakika
+
+// Token ve dosya yönetimi
+const tokens = new Map();
+
+// Klasörü oluştur
+if (!fs.existsSync(DOWNLOAD_DIR)) {
+    fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
+}
+
+// Token oluştur
+function generateToken() {
+    return crypto.randomBytes(16).toString('base64url');
+}
+
+// Eski dosyaları temizle
+function cleanupExpiredFiles() {
+    const now = Date.now();
+    for (const [token, data] of tokens.entries()) {
+        if (now - data.createdAt > TOKEN_EXPIRY) {
+            try {
+                if (fs.existsSync(data.filePath)) {
+                    fs.unlinkSync(data.filePath);
+                }
+            } catch (e) {
+                console.error('[CLEANUP] Dosya silinemedi:', e);
+            }
+            tokens.delete(token);
+        }
+    }
+}
+
+// Periyodik temizlik (her 5 dakika)
+setInterval(cleanupExpiredFiles, 5 * 60 * 1000);
+
+// EXPRESS API SUNUCUSU (BOT İÇİNDE)
+const apiApp = express();
+
+apiApp.get('/', async (req, res) => {
+    const url = req.query.url;
+    if (!url) {
+        return res.status(400).json({ error: 'url parametresi gerekli' });
+    }
+
+    try {
+        const token = generateToken();
+        const filename = `${token}.mp3`;
+        const filePath = path.join(DOWNLOAD_DIR, filename);
+
+        // YouTube'dan ses indir - DOĞRUDAN yt-dlp ile
+        await youtubedl(url, {
+            extractAudio: true,
+            audioFormat: 'mp3',
+            audioQuality: 192,
+            output: filePath,
+            noCheckCertificates: true,
+            noWarnings: true,
+            preferFreeFormats: true,
+            addHeader: [
+                'referer:https://www.youtube.com',
+                'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            ]
+        });
+
+        // Dosya oluştu mu kontrol et
+        if (!fs.existsSync(filePath)) {
+            throw new Error('Dosya oluşturulamadı');
+        }
+
+        // Token'ı kaydet
+        tokens.set(token, {
+            filePath: filePath,
+            filename: filename,
+            createdAt: Date.now()
+        });
+
+        res.json({ token: token });
+
+    } catch (error) {
+        console.error('[API] Hata:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+apiApp.get('/download', (req, res) => {
+    const token = req.query.token;
+    if (!token) {
+        return res.status(400).json({ error: 'token parametresi gerekli' });
+    }
+
+    const data = tokens.get(token);
+    if (!data) {
+        return res.status(404).json({ error: 'Geçersiz veya süresi dolmuş token' });
+    }
+
+    if (!fs.existsSync(data.filePath)) {
+        tokens.delete(token);
+        return res.status(404).json({ error: 'Dosya bulunamadı' });
+    }
+
+    res.download(data.filePath, data.filename, (err) => {
+        if (err) {
+            console.error('[DOWNLOAD] Hata:', err);
+        }
+    });
+});
+
+// API sunucusunu başlat
+apiApp.listen(API_PORT, '0.0.0.0', () => {
+    console.log(`[API] YouTube Audio API ${API_PORT} portunda başlatıldı.`);
+});
 
 // ==========================================
 // RENDER 7/24 AKTİF TUTMA SUNUCUSU
@@ -16,99 +137,15 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-    res.send('EvoBot 7/24 Aktif! Zırhlı Bağlantı Koruması Devrede.');
+    res.send('EvoBot 7/24 Aktif! YouTube Audio API entegre.');
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`Web sunucusu ${PORT} portunda başarıyla başlatıldı.`);
 });
 
 // ==========================================
-// YENİ: ÖZEL YT-AUDIO-API ENTEGRASYONU
-// ==========================================
-const YT_AUDIO_API_URL = process.env.YT_AUDIO_API_URL || 'http://localhost:5000';
-
-async function getAudioFromMyApi(query) {
-    try {
-        // 1. API'den token al
-        const tokenRes = await fetch(`${YT_AUDIO_API_URL}/?url=${encodeURIComponent(query)}`, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-        });
-        
-        if (!tokenRes.ok) {
-            const errorText = await tokenRes.text();
-            throw new Error(`API Token Hatası: ${tokenRes.status} - ${errorText}`);
-        }
-        
-        const data = await tokenRes.json();
-        if (!data.token) throw new Error('API token döndürmedi.');
-        
-        // 2. Token ile indirme URL'sini oluştur
-        const audioDownloadUrl = `${YT_AUDIO_API_URL}/download?token=${data.token}`;
-        
-        // 3. Video bilgilerini al (API'den gelmiyorsa başlık olarak query'yi kullan)
-        const title = query.includes('youtube.com') || query.includes('youtu.be') 
-            ? 'YouTube Şarkısı' 
-            : query;
-        
-        return {
-            title: title,
-            url: query,
-            audioUrl: audioDownloadUrl,
-            durationRaw: 'Bilinmiyor',
-            thumbnail: null
-        };
-    } catch (error) {
-        throw new Error(`API Hatası: ${error.message}`);
-    }
-}
-
-// ==========================================
-// YARDIMCI FONKSİYONLAR
-// ==========================================
-function extractYoutubeId(url) {
-    const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/))([a-zA-Z0-9_-]{11})/);
-    return match ? match[1] : null;
-}
-
-async function getSpotifyTrackName(url) {
-    try {
-        const data = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(url)}`);
-        const json = await data.json();
-        return json.title || 'Spotify Şarkısı';
-    } catch {
-        return 'Spotify Şarkısı';
-    }
-}
-
-function formatDuration(seconds) {
-    if (!seconds) return 'Bilinmiyor';
-    const m = Math.floor(seconds / 60);
-    const s = seconds % 60;
-    return `${m}:${s.toString().padStart(2, '0')}`;
-}
-
-function createFfmpegAudioStream(audioUrl) {
-    return new prism.FFmpeg({
-        command: ffmpegPath,
-        args: [
-            '-reconnect', '1',
-            '-reconnect_streamed', '1',
-            '-reconnect_delay_max', '5',
-            '-i', audioUrl,
-            '-analyzeduration', '0',
-            '-loglevel', '0',
-            '-f', 's16le',
-            '-ar', '48000',
-            '-ac', '2',
-        ],
-    });
-}
-
-// ==========================================
-// DISCORD CLIENT
+// DISCORD BOT
 // ==========================================
 const client = new Client({ 
     intents: [
@@ -133,7 +170,7 @@ const serverBannedWords = new Map();
 
 client.once(Events.ClientReady, (readyClient) => {
     console.log(`[AKTİF] ${readyClient.user.tag} sisteme giriş yaptı. Geliştiriciler: Rizza & Emoc.`);
-    console.log(`[API] YouTube Audio API: ${YT_AUDIO_API_URL}`);
+    console.log(`[API] YouTube Audio API: http://localhost:${API_PORT}`);
 });
 
 // ==========================================
@@ -206,7 +243,7 @@ client.on(Events.MessageCreate, async (message) => {
                     { name: '⏱️ Durum', value: '7/24 Aktif', inline: true },
                     { name: '🛡️ Sunucular', value: `${client.guilds.cache.size} Sunucu`, inline: true },
                     { name: '👑 Geliştiriciler', value: 'Rizza ve Emoc', inline: false },
-                    { name: '🎵 Müzik API', value: YT_AUDIO_API_URL, inline: false }
+                    { name: '🎵 Müzik Sistemi', value: 'Entegre (YouTube Audio API)', inline: false }
                 )
                 .setFooter({ text: 'GitHub & Render Entegrasyonu' })
                 .setTimestamp();
@@ -254,7 +291,7 @@ client.on(Events.MessageCreate, async (message) => {
         }
 
         // ==========================================
-        // 2. MÜZİK SİSTEMİ (API ENTEGRASYONLU)
+        // 2. MÜZİK SİSTEMİ (TAMAMEN ENTEGRE)
         // ==========================================
 
         if (command === '!spawn') {
@@ -278,19 +315,32 @@ client.on(Events.MessageCreate, async (message) => {
                     adapterCreator: message.guild.voiceAdapterCreator,
                 });
 
-                const loadingMsg = await message.reply("🔎 Özel API üzerinden şarkı aranıyor ve dönüştürülüyor...");
+                const loadingMsg = await message.reply("🔎 YouTube'dan ses alınıyor ve MP3'e dönüştürülüyor...");
 
-                let searchQuery = query;
+                // API'ye istek at (localhost:3001)
+                const apiUrl = `http://localhost:${API_PORT}/?url=${encodeURIComponent(query)}`;
+                const tokenRes = await fetch(apiUrl);
+                const data = await tokenRes.json();
 
-                // Spotify linki ise başlığını al
-                if (query.includes('spotify.com')) {
-                    searchQuery = await getSpotifyTrackName(query);
+                if (!tokenRes.ok || !data.token) {
+                    throw new Error(data.error || 'API hatası');
                 }
 
-                // API'den ses bilgisini al
-                const audioInfo = await getAudioFromMyApi(searchQuery);
+                const audioUrl = `http://localhost:${API_PORT}/download?token=${data.token}`;
 
-                const ffmpegStream = createFfmpegAudioStream(audioInfo.audioUrl);
+                // Başlık bilgisini al
+                let title = query;
+                if (query.includes('youtube.com') || query.includes('youtu.be')) {
+                    title = 'YouTube Şarkısı';
+                } else if (query.includes('spotify.com')) {
+                    try {
+                        const spotifyRes = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(query)}`);
+                        const spotifyData = await spotifyRes.json();
+                        title = spotifyData.title || 'Spotify Şarkısı';
+                    } catch {}
+                }
+
+                const ffmpegStream = createFfmpegAudioStream(audioUrl);
                 const resource = createAudioResource(ffmpegStream, { inputType: StreamType.Raw });
                 const player = createAudioPlayer();
 
@@ -309,12 +359,10 @@ client.on(Events.MessageCreate, async (message) => {
                 const playEmbed = new EmbedBuilder()
                     .setTitle('🎶 Müzik Başladı!')
                     .setColor(0x5865F2)
-                    .setDescription(`**[${audioInfo.title}](${audioInfo.url})**`)
-                    .setThumbnail(audioInfo.thumbnail || client.user.displayAvatarURL())
+                    .setDescription(`**[${title}](${query})**`)
                     .addFields(
                         { name: 'Kanal', value: `${voiceChannel.name}`, inline: true },
-                        { name: 'Süre', value: `${audioInfo.durationRaw}`, inline: true },
-                        { name: 'Kaynak', value: 'Özel YouTube Audio API', inline: true }
+                        { name: 'Kaynak', value: 'YouTube Audio API (Entegre)', inline: true }
                     )
                     .setFooter({ text: `İsteyen: ${message.author.tag}`, iconURL: message.author.displayAvatarURL() })
                     .setTimestamp();
@@ -518,5 +566,25 @@ client.on(Events.MessageCreate, async (message) => {
         console.error('[MESSAGE HANDLER ERROR]', topLevelErr);
     }
 });
+
+// ==========================================
+// YARDIMCI FONKSİYONLAR
+// ==========================================
+function createFfmpegAudioStream(audioUrl) {
+    return new prism.FFmpeg({
+        command: ffmpegPath,
+        args: [
+            '-reconnect', '1',
+            '-reconnect_streamed', '1',
+            '-reconnect_delay_max', '5',
+            '-i', audioUrl,
+            '-analyzeduration', '0',
+            '-loglevel', '0',
+            '-f', 's16le',
+            '-ar', '48000',
+            '-ac', '2',
+        ],
+    });
+}
 
 client.login(process.env.DISCORD_TOKEN);
