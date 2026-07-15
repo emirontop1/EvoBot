@@ -2,7 +2,6 @@ const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const http = require('http');
 require('dotenv').config();
 
-// Render'ı uyanık tutmak için basit sunucu
 http.createServer((req, res) => {
     res.writeHead(200);
     res.end('Bot aktif!');
@@ -23,24 +22,37 @@ client.once('ready', () => {
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
 
-    // /help komutu
+    // Yardım Komutu
     if (message.content === '/help') {
-        message.reply('**Komutlar:**\n/help - Yardım menüsünü gösterir.\n/dashboard - Botun durum bilgilerini gösterir.');
+        const helpEmbed = new EmbedBuilder()
+            .setTitle('📖 Yardım Menüsü')
+            .setColor(0xFFD700) // Altın rengi
+            .setDescription('İşte kullanabileceğin komutlar:')
+            .addFields(
+                { name: '/help', value: 'Yardım menüsünü görüntüler.', inline: false },
+                { name: '/dashboard', value: 'Botun profilini ve bilgilerini gösterir.', inline: false }
+            )
+            .setFooter({ text: 'EvoBot tarafından desteklenir' });
+        
+        message.reply({ embeds: [helpEmbed] });
     }
 
-    // /dashboard komutu
+    // Dashboard Komutu
     if (message.content === '/dashboard') {
-        const embed = new EmbedBuilder()
-            .setTitle('Bot Paneli')
-            .setColor(0x0099FF)
-            .setDescription('Bot şu an aktif ve sorunsuz çalışıyor.')
+        const dashboardEmbed = new EmbedBuilder()
+            .setTitle('🤖 Bot Hakkında')
+            .setColor(0x00FF80) // Yeşilimsi
+            .setThumbnail(client.user.displayAvatarURL()) // Botun profil resmi
+            .setDescription(`Merhaba, ben **${client.user.username}**!`)
             .addFields(
-                { name: 'Durum', value: 'Çevrimiçi', inline: true },
-                { name: 'Kütüphane', value: 'Discord.js', inline: true }
+                { name: '🛠️ Şu an destekliyorum:', value: '/help ve /dashboard komutlarını kullanabilirsin.', inline: false },
+                { name: '⚡ Durum', value: '7/24 Aktif', inline: true },
+                { name: '💻 Geliştirici', value: 'Burak', inline: true }
             )
+            .setFooter({ text: 'Kodlarım GitHub üzerinden yönetiliyor.' })
             .setTimestamp();
             
-        message.reply({ embeds: [embed] });
+        message.reply({ embeds: [dashboardEmbed] });
     }
 });
 
