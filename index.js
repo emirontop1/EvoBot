@@ -10,6 +10,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { spawn } = require('child_process');
 require('dotenv').config();
 
 // ==========================================
@@ -53,7 +54,7 @@ function cleanupExpiredFiles() {
 setInterval(cleanupExpiredFiles, 5 * 60 * 1000);
 
 // ==========================================
-// INVIDIOUS API FONKSİYONLARI
+// GELİŞMİŞ INVIDIOUS API FONKSİYONLARI
 // ==========================================
 const INVIDIOUS_INSTANCES = [
     'https://invidious.projectsegfau.lt',
@@ -61,74 +62,120 @@ const INVIDIOUS_INSTANCES = [
     'https://invidious.drgns.space',
     'https://inv.nadeko.net',
     'https://invidious.nerdvpn.de',
-    'https://invidious.tiekoetter.com'
+    'https://invidious.tiekoetter.com',
+    'https://invidious.webovernight.com',
+    'https://invidious.esmailelbob.xyz'
 ];
 
-async function fetchWithTimeout(url, ms = 15000) {
+async function fetchJson(url) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), ms);
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    
     try {
-        return await fetch(url, { 
+        const response = await fetch(url, {
             signal: controller.signal,
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'application/json'
             }
         });
-    } finally {
+        
         clearTimeout(timeout);
+        
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        
+        const text = await response.text();
+        
+        // JSON olup olmadığını kontrol et
+        if (!text.trim().startsWith('{') && !text.trim().startsWith('[')) {
+            throw new Error('Sunucu JSON döndürmedi (muhtemelen kapalı)');
+        }
+        
+        return JSON.parse(text);
+    } catch (error) {
+        clearTimeout(timeout);
+        throw error;
     }
 }
 
 async function getVideoInfo(videoId) {
     let lastError;
+    
     for (const instance of INVIDIOUS_INSTANCES) {
         try {
             const url = `${instance}/api/v1/videos/${videoId}`;
-            const res = await fetchWithTimeout(url);
-            if (!res.ok) continue;
-            const data = await res.json();
-            if (data.error) continue;
+            console.log(`[INVIDIOUS] ${instance} deneniyor...`);
+            
+            const data = await fetchJson(url);
+            
+            if (!data || data.error) {
+                continue;
+            }
             
             // Ses formatlarını bul
             const audioFormats = (data.adaptiveFormats || [])
-                .filter(f => f.type && f.type.startsWith('audio/mp4') || f.type?.startsWith('audio/webm'));
+                .filter(f => {
+                    if (!f || !f.type) return false;
+                    return f.type.startsWith('audio/mp4') || 
+                           f.type.startsWith('audio/webm') ||
+                           f.type.startsWith('audio/mpeg');
+                });
             
-            if (audioFormats.length === 0) continue;
+            if (audioFormats.length === 0) {
+                console.log(`[INVIDIOUS] ${instance} ses formatı bulunamadı`);
+                continue;
+            }
             
             // En yüksek bitrate'li sesi seç
             audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+            const bestAudio = audioFormats[0];
+            
+            console.log(`[INVIDIOUS] ✅ ${instance} başarılı!`);
             
             return {
                 title: data.title || 'Bilinmeyen Şarkı',
-                audioUrl: audioFormats[0].url,
-                duration: data.lengthSeconds,
+                audioUrl: bestAudio.url,
+                duration: data.lengthSeconds || 0,
                 thumbnail: data.videoThumbnails?.[0]?.url || null
             };
         } catch (e) {
             lastError = e;
-            console.error(`[INVIDIOUS] ${instance} başarısız:`, e.message);
+            console.log(`[INVIDIOUS] ❌ ${instance} başarısız:`, e.message);
         }
     }
+    
     throw lastError || new Error('Tüm Invidious sunucuları başarısız');
 }
 
 async function searchVideo(query) {
     let lastError;
+    
     for (const instance of INVIDIOUS_INSTANCES) {
         try {
             const url = `${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=video&sort=relevance`;
-            const res = await fetchWithTimeout(url);
-            if (!res.ok) continue;
-            const data = await res.json();
-            if (!data || data.length === 0) continue;
+            console.log(`[INVIDIOUS SEARCH] ${instance} deneniyor...`);
+            
+            const data = await fetchJson(url);
+            
+            if (!data || data.length === 0) {
+                continue;
+            }
             
             const video = data[0];
+            if (!video || !video.videoId) {
+                continue;
+            }
+            
+            console.log(`[INVIDIOUS SEARCH] ✅ ${instance} başarılı!`);
             return video.videoId;
         } catch (e) {
             lastError = e;
-            console.error(`[INVIDIOUS SEARCH] ${instance} başarısız:`, e.message);
+            console.log(`[INVIDIOUS SEARCH] ❌ ${instance} başarısız:`, e.message);
         }
     }
+    
     throw lastError || new Error('Arama sonucu bulunamadı');
 }
 
@@ -144,6 +191,8 @@ apiApp.get('/', async (req, res) => {
     }
 
     try {
+        console.log(`[API] İstek: ${url}`);
+        
         // YouTube video ID'sini çıkar
         let videoId = url;
         const idMatch = url.match(/(?:v=|\/)([a-zA-Z0-9_-]{11})/);
@@ -154,6 +203,8 @@ apiApp.get('/', async (req, res) => {
             videoId = await searchVideo(url);
         }
 
+        console.log(`[API] Video ID: ${videoId}`);
+        
         // Video bilgilerini al
         const info = await getVideoInfo(videoId);
         if (!info || !info.audioUrl) {
@@ -164,18 +215,27 @@ apiApp.get('/', async (req, res) => {
         const filename = `${token}.mp3`;
         const filePath = path.join(DOWNLOAD_DIR, filename);
 
+        console.log(`[API] Ses indiriliyor: ${info.audioUrl.substring(0, 50)}...`);
+        
         // Ses dosyasını indir
-        const audioRes = await fetchWithTimeout(info.audioUrl);
-        if (!audioRes.ok) throw new Error(`İndirme hatası: ${audioRes.status}`);
+        const audioRes = await fetch(info.audioUrl, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            }
+        });
+        
+        if (!audioRes.ok) {
+            throw new Error(`İndirme hatası: ${audioRes.status}`);
+        }
         
         const buffer = await audioRes.arrayBuffer();
-        
-        // FFmpeg ile MP3'e dönüştür
         const tempPath = filePath + '.temp';
         fs.writeFileSync(tempPath, Buffer.from(buffer));
         
+        console.log(`[API] FFmpeg ile MP3'e dönüştürülüyor...`);
+        
+        // FFmpeg ile MP3'e dönüştür
         await new Promise((resolve, reject) => {
-            const { spawn } = require('child_process');
             const ffmpeg = spawn(ffmpegPath, [
                 '-i', tempPath,
                 '-acodec', 'libmp3lame',
@@ -187,10 +247,12 @@ apiApp.get('/', async (req, res) => {
             
             ffmpeg.on('close', (code) => {
                 if (code === 0) {
-                    fs.unlinkSync(tempPath);
+                    try {
+                        fs.unlinkSync(tempPath);
+                    } catch (e) {}
                     resolve();
                 } else {
-                    reject(new Error('FFmpeg dönüştürme hatası'));
+                    reject(new Error(`FFmpeg hatası: ${code}`));
                 }
             });
             
@@ -204,6 +266,8 @@ apiApp.get('/', async (req, res) => {
             createdAt: Date.now()
         });
 
+        console.log(`[API] ✅ Başarılı! Token: ${token}`);
+        
         res.json({ 
             token: token,
             title: info.title,
@@ -211,7 +275,7 @@ apiApp.get('/', async (req, res) => {
         });
 
     } catch (error) {
-        console.error('[API] Hata:', error);
+        console.error('[API] ❌ Hata:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -324,6 +388,13 @@ function createFfmpegAudioStream(audioUrl) {
             '-ac', '2',
         ],
     });
+}
+
+function formatDuration(seconds) {
+    if (!seconds) return 'Bilinmiyor';
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
 // ==========================================
@@ -454,6 +525,8 @@ client.on(Events.MessageCreate, async (message) => {
 
                 // API'ye istek at
                 const apiUrl = `http://localhost:${API_PORT}/?url=${encodeURIComponent(query)}`;
+                console.log(`[BOT] API isteği: ${apiUrl}`);
+                
                 const tokenRes = await fetch(apiUrl);
                 const data = await tokenRes.json();
 
@@ -463,6 +536,7 @@ client.on(Events.MessageCreate, async (message) => {
 
                 const audioUrl = `http://localhost:${API_PORT}/download?token=${data.token}`;
                 const title = data.title || query;
+                const duration = data.duration ? formatDuration(data.duration) : 'Bilinmiyor';
 
                 const ffmpegStream = createFfmpegAudioStream(audioUrl);
                 const resource = createAudioResource(ffmpegStream, { inputType: StreamType.Raw });
@@ -479,8 +553,6 @@ client.on(Events.MessageCreate, async (message) => {
                     console.error('Ses Oynatıcı Hatası:', error);
                     connection.destroy();
                 });
-
-                const duration = data.duration ? formatDuration(data.duration) : 'Bilinmiyor';
 
                 const playEmbed = new EmbedBuilder()
                     .setTitle('🎶 Müzik Başladı!')
@@ -693,15 +765,5 @@ client.on(Events.MessageCreate, async (message) => {
         console.error('[MESSAGE HANDLER ERROR]', topLevelErr);
     }
 });
-
-// ==========================================
-// YARDIMCI FONKSİYONLAR (DEVAM)
-// ==========================================
-function formatDuration(seconds) {
-    if (!seconds) return 'Bilinmiyor';
-    const m = Math.floor(seconds / 60);
-    const s = seconds % 60;
-    return `${m}:${s.toString().padStart(2, '0')}`;
-}
 
 client.login(process.env.DISCORD_TOKEN);
