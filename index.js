@@ -17,15 +17,32 @@ require('dotenv').config();
 // RAPIDAPI YOUTUBE MP3 API KONFIGÜRASYONU
 // ==========================================
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || 'c117d04483msh4264758dcda6a40p10e853jsnf21edfc88ecb';
-const RAPIDAPI_HOST = 'youtube-mp310.p.rapidapi.com';
-const API_URL = `https://${RAPIDAPI_HOST}/download/mp3`;
+
+// BİRDEN FAZLA API DENE (Hangisi çalışırsa)
+const APIS = [
+    {
+        host: 'youtube-mp310.p.rapidapi.com',
+        path: '/download/mp3',
+        urlField: 'downloadUrl'
+    },
+    {
+        host: 'youtube-mp3-downloader2.p.rapidapi.com',
+        path: '/ytmp3',
+        urlField: 'link'
+    },
+    {
+        host: 'youtube-to-mp3-converter.p.rapidapi.com',
+        path: '/api/convert',
+        urlField: 'downloadLink'
+    }
+];
 
 // ==========================================
 // YT-AUDIO-API (RAPIDAPI TABANLI)
 // ==========================================
 const API_PORT = process.env.API_PORT || 3001;
 const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
-const TOKEN_EXPIRY = 5 * 60 * 1000; // 5 dakika
+const TOKEN_EXPIRY = 5 * 60 * 1000;
 
 const tokens = new Map();
 
@@ -54,108 +71,120 @@ function cleanupExpiredFiles() {
 setInterval(cleanupExpiredFiles, 5 * 60 * 1000);
 
 // ==========================================
-// RAPIDAPI ÜZERİNDEN MP3 İNDİR
+// RAPIDAPI ÜZERİNDEN MP3 İNDİR (ÇOKLU API DESTEĞİ)
 // ==========================================
 async function downloadFromRapidAPI(url) {
-    try {
-        // YouTube URL'sini temizle
-        let cleanUrl = url;
-        if (url.includes('youtu.be')) {
-            const idMatch = url.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/);
-            if (idMatch) {
-                cleanUrl = `https://www.youtube.com/watch?v=${idMatch[1]}`;
-            }
-        } else if (url.includes('youtube.com/shorts/')) {
-            const idMatch = url.match(/shorts\/([a-zA-Z0-9_-]{11})/);
-            if (idMatch) {
-                cleanUrl = `https://www.youtube.com/watch?v=${idMatch[1]}`;
-            }
+    // YouTube URL'sini temizle
+    let cleanUrl = url;
+    if (url.includes('youtu.be')) {
+        const idMatch = url.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/);
+        if (idMatch) {
+            cleanUrl = `https://www.youtube.com/watch?v=${idMatch[1]}`;
         }
-
-        console.log(`[RAPIDAPI] İstek gönderiliyor: ${cleanUrl}`);
-
-        // RapidAPI'ye istek at
-        const response = await fetch(`${API_URL}?url=${encodeURIComponent(cleanUrl)}`, {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'application/json',
-                'x-rapidapi-host': RAPIDAPI_HOST,
-                'x-rapidapi-key': RAPIDAPI_KEY
-            }
-        });
-
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`API Hatası: ${response.status} - ${errorText}`);
+    } else if (url.includes('youtube.com/shorts/')) {
+        const idMatch = url.match(/shorts\/([a-zA-Z0-9_-]{11})/);
+        if (idMatch) {
+            cleanUrl = `https://www.youtube.com/watch?v=${idMatch[1]}`;
         }
-
-        const data = await response.json();
-        console.log('[RAPIDAPI] Yanıt:', JSON.stringify(data).substring(0, 200));
-
-        // API yanıtını kontrol et
-        if (data.error) {
-            throw new Error(`API Hatası: ${data.error}`);
-        }
-
-        // MP3 dosyasının URL'sini al (farklı formatlara göre)
-        let mp3Url = null;
-        let title = 'Bilinmeyen Şarkı';
-        let duration = 0;
-        let thumbnail = null;
-
-        if (data.mp3 || data.downloadUrl || data.url) {
-            mp3Url = data.mp3 || data.downloadUrl || data.url;
-        } else if (data.link) {
-            mp3Url = data.link;
-        } else if (data.data && data.data.url) {
-            mp3Url = data.data.url;
-        }
-
-        // Başlık bilgisini al
-        if (data.title) {
-            title = data.title;
-        } else if (data.Title) {
-            title = data.Title;
-        } else if (data.meta && data.meta.title) {
-            title = data.meta.title;
-        }
-
-        // Süre bilgisini al
-        if (data.duration) {
-            duration = data.duration;
-        } else if (data.Duration) {
-            duration = data.Duration;
-        } else if (data.meta && data.meta.duration) {
-            duration = data.meta.duration;
-        }
-
-        // Thumbnail bilgisini al
-        if (data.thumbnail) {
-            thumbnail = data.thumbnail;
-        } else if (data.Thumbnail) {
-            thumbnail = data.Thumbnail;
-        } else if (data.meta && data.meta.thumbnail) {
-            thumbnail = data.meta.thumbnail;
-        }
-
-        if (!mp3Url) {
-            console.error('[RAPIDAPI] MP3 URL bulunamadı, yanıt:', data);
-            throw new Error('MP3 dosyası URL\'si bulunamadı');
-        }
-
-        console.log(`[RAPIDAPI] ✅ MP3 URL alındı: ${mp3Url.substring(0, 50)}...`);
-
-        return {
-            title: title,
-            audioUrl: mp3Url,
-            duration: duration,
-            thumbnail: thumbnail
-        };
-
-    } catch (error) {
-        console.error('[RAPIDAPI] Hata:', error);
-        throw error;
     }
+
+    let lastError;
+
+    // Tüm API'leri dene
+    for (const api of APIS) {
+        try {
+            console.log(`[RAPIDAPI] ${api.host} deneniyor...`);
+
+            const response = await fetch(`https://${api.host}${api.path}?url=${encodeURIComponent(cleanUrl)}`, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-rapidapi-host': api.host,
+                    'x-rapidapi-key': RAPIDAPI_KEY
+                }
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.log(`[RAPIDAPI] ${api.host} HTTP ${response.status}: ${errorText.substring(0, 100)}`);
+                continue;
+            }
+
+            const data = await response.json();
+            console.log(`[RAPIDAPI] ${api.host} yanıt:`, JSON.stringify(data).substring(0, 200));
+
+            // MP3 URL'sini bul
+            let mp3Url = null;
+            let title = 'Bilinmeyen Şarkı';
+            let duration = 0;
+            let thumbnail = null;
+
+            // Farklı yanıt formatlarını dene
+            if (data[api.urlField]) {
+                mp3Url = data[api.urlField];
+            } else if (data.mp3) {
+                mp3Url = data.mp3;
+            } else if (data.url) {
+                mp3Url = data.url;
+            } else if (data.link) {
+                mp3Url = data.link;
+            } else if (data.download) {
+                mp3Url = data.download;
+            } else if (data.data && data.data.url) {
+                mp3Url = data.data.url;
+            }
+
+            // Başlık bilgisini al
+            if (data.title) {
+                title = data.title;
+            } else if (data.Title) {
+                title = data.Title;
+            } else if (data.meta && data.meta.title) {
+                title = data.meta.title;
+            }
+
+            // Süre bilgisini al
+            if (data.duration) {
+                duration = data.duration;
+            } else if (data.Duration) {
+                duration = data.Duration;
+            } else if (data.meta && data.meta.duration) {
+                duration = data.meta.duration;
+            }
+
+            // Thumbnail bilgisini al
+            if (data.thumbnail) {
+                thumbnail = data.thumbnail;
+            } else if (data.Thumbnail) {
+                thumbnail = data.Thumbnail;
+            }
+
+            if (!mp3Url) {
+                console.log(`[RAPIDAPI] ${api.host} MP3 URL bulunamadı`);
+                continue;
+            }
+
+            // URL geçerli mi kontrol et
+            if (mp3Url.startsWith('http')) {
+                console.log(`[RAPIDAPI] ✅ ${api.host} başarılı!`);
+                return {
+                    title: title,
+                    audioUrl: mp3Url,
+                    duration: duration,
+                    thumbnail: thumbnail
+                };
+            } else {
+                console.log(`[RAPIDAPI] ${api.host} geçersiz URL: ${mp3Url}`);
+                continue;
+            }
+
+        } catch (error) {
+            console.log(`[RAPIDAPI] ${api.host} hata:`, error.message);
+            lastError = error;
+        }
+    }
+
+    throw lastError || new Error('Tüm API\'ler başarısız oldu');
 }
 
 // ==========================================
@@ -189,44 +218,74 @@ apiApp.get('/', async (req, res) => {
         });
 
         if (!audioRes.ok) {
+            // URL'yi tekrar dene (redirect varsa)
+            if (audioRes.status === 302 || audioRes.status === 301) {
+                const redirectUrl = audioRes.headers.get('location');
+                if (redirectUrl) {
+                    console.log(`[API] Yönlendirme: ${redirectUrl}`);
+                    const redirectRes = await fetch(redirectUrl);
+                    if (!redirectRes.ok) {
+                        throw new Error(`Yönlendirme hatası: ${redirectRes.status}`);
+                    }
+                    const buffer = await redirectRes.arrayBuffer();
+                    fs.writeFileSync(filePath, Buffer.from(buffer));
+                    tokens.set(token, {
+                        filePath: filePath,
+                        filename: filename,
+                        createdAt: Date.now()
+                    });
+                    return res.json({
+                        token: token,
+                        title: info.title,
+                        duration: info.duration,
+                        thumbnail: info.thumbnail
+                    });
+                }
+            }
             throw new Error(`İndirme hatası: ${audioRes.status}`);
         }
 
         const buffer = await audioRes.arrayBuffer();
         fs.writeFileSync(filePath, Buffer.from(buffer));
 
-        // Eğer dosya MP3 değilse (başka format geldiyse) FFmpeg ile dönüştür
+        // Dosya boyutunu kontrol et
         const stats = fs.statSync(filePath);
-        if (stats.size > 0) {
-            // MP3 olup olmadığını kontrol et
-            const header = Buffer.from(buffer).slice(0, 3).toString();
-            if (header !== 'ID3' && header !== '\xFF\xFB' && header !== '\xFF\xF3') {
-                console.log('[API] FFmpeg ile MP3\'e dönüştürülüyor...');
-                const tempPath = filePath + '.temp';
-                fs.renameSync(filePath, tempPath);
+        if (stats.size < 1000) {
+            throw new Error('İndirilen dosya çok küçük (muhtemelen hatalı)');
+        }
 
-                await new Promise((resolve, reject) => {
-                    const ffmpeg = spawn(ffmpegPath, [
-                        '-i', tempPath,
-                        '-acodec', 'libmp3lame',
-                        '-ab', '192k',
-                        '-ar', '44100',
-                        '-ac', '2',
-                        filePath
-                    ]);
+        // MP3 kontrolü (ID3 tag veya MP3 header)
+        const header = Buffer.from(buffer).slice(0, 3).toString('hex');
+        const isMp3 = header.startsWith('494433') || // ID3
+                     header.startsWith('fffb') ||    // MP3
+                     header.startsWith('fff3');      // MP3
 
-                    ffmpeg.on('close', (code) => {
-                        if (code === 0) {
-                            try { fs.unlinkSync(tempPath); } catch (e) {}
-                            resolve();
-                        } else {
-                            reject(new Error(`FFmpeg hatası: ${code}`));
-                        }
-                    });
+        if (!isMp3 && stats.size > 0) {
+            console.log('[API] Dosya MP3 değil, FFmpeg ile dönüştürülüyor...');
+            const tempPath = filePath + '.temp';
+            fs.renameSync(filePath, tempPath);
 
-                    ffmpeg.on('error', reject);
+            await new Promise((resolve, reject) => {
+                const ffmpeg = spawn(ffmpegPath, [
+                    '-i', tempPath,
+                    '-acodec', 'libmp3lame',
+                    '-ab', '192k',
+                    '-ar', '44100',
+                    '-ac', '2',
+                    filePath
+                ]);
+
+                ffmpeg.on('close', (code) => {
+                    if (code === 0) {
+                        try { fs.unlinkSync(tempPath); } catch (e) {}
+                        resolve();
+                    } else {
+                        reject(new Error(`FFmpeg hatası: ${code}`));
+                    }
                 });
-            }
+
+                ffmpeg.on('error', reject);
+            });
         }
 
         tokens.set(token, {
@@ -277,7 +336,7 @@ apiApp.get('/download', (req, res) => {
 
 apiApp.listen(API_PORT, '0.0.0.0', () => {
     console.log(`[API] YouTube Audio API ${API_PORT} portunda başlatıldı.`);
-    console.log(`[API] RapidAPI YouTube MP3 aktif!`);
+    console.log(`[API] ${APIS.length} farklı RapidAPI servisi aktif!`);
 });
 
 // ==========================================
@@ -295,7 +354,7 @@ app.listen(PORT, '0.0.0.0', () => {
 });
 
 // ==========================================
-// DISCORD BOT
+// DISCORD BOT (Aynı)
 // ==========================================
 const client = new Client({
     intents: [
@@ -319,7 +378,6 @@ const serverBannedWords = new Map();
 
 client.once(Events.ClientReady, (readyClient) => {
     console.log(`[AKTİF] ${readyClient.user.tag} sisteme giriş yaptı. Geliştiriciler: Rizza & Emoc.`);
-    console.log(`[API] RapidAPI YouTube MP3: ${API_URL}`);
 });
 
 // ==========================================
@@ -368,7 +426,7 @@ function formatDuration(seconds) {
 }
 
 // ==========================================
-// MESAJ YAKALAYICI
+// MESAJ YAKALAYICI (KISALTILMIŞ)
 // ==========================================
 client.on(Events.MessageCreate, async (message) => {
     try {
@@ -419,7 +477,7 @@ client.on(Events.MessageCreate, async (message) => {
                     { name: '⏱️ Durum', value: '7/24 Aktif', inline: true },
                     { name: '🛡️ Sunucular', value: `${client.guilds.cache.size} Sunucu`, inline: true },
                     { name: '👑 Geliştiriciler', value: 'Rizza ve Emoc', inline: false },
-                    { name: '🎵 Müzik Sistemi', value: 'RapidAPI YouTube MP3', inline: false }
+                    { name: '🎵 Müzik Sistemi', value: 'RapidAPI (Çoklu Servis)', inline: false }
                 )
                 .setFooter({ text: 'GitHub & Render Entegrasyonu' })
                 .setTimestamp();
@@ -467,7 +525,7 @@ client.on(Events.MessageCreate, async (message) => {
         }
 
         // ==========================================
-        // 2. MÜZİK SİSTEMİ (RAPIDAPI)
+        // 2. MÜZİK SİSTEMİ
         // ==========================================
 
         if (command === '!spawn') {
@@ -531,7 +589,7 @@ client.on(Events.MessageCreate, async (message) => {
                     .addFields(
                         { name: 'Kanal', value: `${voiceChannel.name}`, inline: true },
                         { name: 'Süre', value: duration, inline: true },
-                        { name: 'Kaynak', value: 'RapidAPI YouTube MP3', inline: true }
+                        { name: 'Kaynak', value: 'RapidAPI (Çoklu Servis)', inline: true }
                     )
                     .setFooter({ text: `İsteyen: ${message.author.tag}`, iconURL: message.author.displayAvatarURL() })
                     .setTimestamp();
