@@ -1,8 +1,8 @@
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const http = require('http');
 require('dotenv').config();
 
-// Render'ı uyanık tutmak için
+// Render'ı uyanık tutmak için basit sunucu
 http.createServer((req, res) => {
     res.writeHead(200);
     res.end('Bot aktif!');
@@ -23,10 +23,24 @@ client.once('ready', () => {
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
 
-    if (message.content === '!ping') {
-        // Logları artık Supabase'e değil, direkt Render'ın kendi konsoluna yazdırıyoruz
-        console.log(`Log: ${message.author.username} tarafından ping komutu kullanıldı.`);
-        message.reply('Pong! Log başarıyla konsola kaydedildi.');
+    // /help komutu
+    if (message.content === '/help') {
+        message.reply('**Komutlar:**\n/help - Yardım menüsünü gösterir.\n/dashboard - Botun durum bilgilerini gösterir.');
+    }
+
+    // /dashboard komutu
+    if (message.content === '/dashboard') {
+        const embed = new EmbedBuilder()
+            .setTitle('Bot Paneli')
+            .setColor(0x0099FF)
+            .setDescription('Bot şu an aktif ve sorunsuz çalışıyor.')
+            .addFields(
+                { name: 'Durum', value: 'Çevrimiçi', inline: true },
+                { name: 'Kütüphane', value: 'Discord.js', inline: true }
+            )
+            .setTimestamp();
+            
+        message.reply({ embeds: [embed] });
     }
 });
 
