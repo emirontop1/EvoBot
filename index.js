@@ -6,195 +6,63 @@ const {
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType, getVoiceConnection } = require('@discordjs/voice');
 const prism = require('prism-media');
 const ffmpegPath = require('ffmpeg-static');
-const youtubedl = require('youtube-dl-exec');
 const express = require('express');
 require('dotenv').config();
 
 // ==========================================
-// GÜVENLİ API İSTEK FONKSİYONLARI (Cloudflare Çökme Koruması)
+// RENDER 7/24 AKTİF TUTMA SUNUCUSU
 // ==========================================
-async function fetchWithTimeout(url, ms = 15000) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), ms);
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+    res.send('EvoBot 7/24 Aktif! Zırhlı Bağlantı Koruması Devrede.');
+});
+
+app.listen(PORT, () => {
+    console.log(`Web sunucusu ${PORT} portunda başarıyla başlatıldı.`);
+});
+
+// ==========================================
+// YENİ: ÖZEL YT-AUDIO-API ENTEGRASYONU
+// ==========================================
+const YT_AUDIO_API_URL = process.env.YT_AUDIO_API_URL || 'http://localhost:5000';
+
+async function getAudioFromMyApi(query) {
     try {
-        return await fetch(url, { 
-            signal: controller.signal,
+        // 1. API'den token al
+        const tokenRes = await fetch(`${YT_AUDIO_API_URL}/?url=${encodeURIComponent(query)}`, {
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36',
-                'Accept': 'application/json'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
         });
-    } finally {
-        clearTimeout(timeout);
-    }
-}
-
-async function safeFetchJson(url) {
-    const res = await fetchWithTimeout(url);
-    const text = await res.text();
-    try {
-        const data = JSON.parse(text);
-        if (!res.ok) throw new Error(`HTTP ${res.status}: ${data.error || 'API Hatası'}`);
-        return data;
-    } catch (err) {
-        // Eğer sunucu JSON yerine HTML/Cloudflare engeli gönderirse hatayı yakalayıp döngüyü bozmadan diğer sunucuya geçmesini sağlıyoruz.
-        if (err.name === 'SyntaxError' || text.includes('<html') || text.includes('<!DOCTYPE')) {
-            throw new Error(`Cloudflare / Bot Koruması: Sunucu HTML sayfası döndürdü (HTTP ${res.status}).`);
+        
+        if (!tokenRes.ok) {
+            const errorText = await tokenRes.text();
+            throw new Error(`API Token Hatası: ${tokenRes.status} - ${errorText}`);
         }
-        throw err;
-    }
-}
-
-// ==========================================
-// MÜZİK KAYNAĞI 1 (ANA PLAN): yt-dlp + Android Bypass
-// ==========================================
-async function getAudioViaYtDlp(query) {
-    const isUrl = /^https?:\/\//.test(query);
-    const target = isUrl ? query : `ytsearch1:${query}`;
-
-    try {
-        const output = await youtubedl(target, {
-            dumpSingleJson: true,
-            noCheckCertificates: true,
-            noWarnings: true,
-            preferFreeFormats: true,
-            format: 'bestaudio/best',
-            extractorArgs: 'youtube:player_client=android,web_creator',
-            addHeader: [
-                'referer:https://m.youtube.com',
-                'user-agent:Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36'
-            ]
-        });
-
-        const info = (output && Array.isArray(output.entries)) ? output.entries[0] : output;
-        if (!info || !info.url) throw new Error('yt-dlp ses akışı bulamadı.');
-
-        const thumb = info.thumbnail || (Array.isArray(info.thumbnails) && info.thumbnails.length > 0
-            ? info.thumbnails[info.thumbnails.length - 1].url
-            : null);
-
+        
+        const data = await tokenRes.json();
+        if (!data.token) throw new Error('API token döndürmedi.');
+        
+        // 2. Token ile indirme URL'sini oluştur
+        const audioDownloadUrl = `${YT_AUDIO_API_URL}/download?token=${data.token}`;
+        
+        // 3. Video bilgilerini al (API'den gelmiyorsa başlık olarak query'yi kullan)
+        const title = query.includes('youtube.com') || query.includes('youtu.be') 
+            ? 'YouTube Şarkısı' 
+            : query;
+        
         return {
-            title: info.title || 'Bilinmeyen şarkı',
-            url: info.webpage_url || info.original_url || (info.id ? `https://www.youtube.com/watch?v=${info.id}` : target),
-            audioUrl: info.url,
-            durationRaw: formatDuration(info.duration),
-            thumbnail: thumb
+            title: title,
+            url: query,
+            audioUrl: audioDownloadUrl,
+            durationRaw: 'Bilinmiyor',
+            thumbnail: null
         };
     } catch (error) {
-        throw new Error(error.message);
+        throw new Error(`API Hatası: ${error.message}`);
     }
-}
-
-// ==========================================
-// MÜZİK KAYNAĞI 2 (YEDEK PLAN): INVIDIOUS
-// ==========================================
-let cachedInstances = null;
-let cachedInstancesTime = 0;
-
-const FALLBACK_INSTANCES = [
-    'https://invidious.projectsegfau.lt',
-    'https://inv.tux.pizza',
-    'https://invidious.drgns.space',
-    'https://inv.nadeko.net',
-    'https://invidious.nerdvpn.de',
-    'https://invidious.tiekoetter.com'
-];
-
-async function getInvidiousInstances() {
-    if (cachedInstances && Date.now() - cachedInstancesTime < 10 * 60 * 1000) {
-        return cachedInstances;
-    }
-    try {
-        const data = await safeFetchJson('https://api.invidious.io/instances.json?sort_by=health');
-        const healthy = data
-            .filter(([, info]) => info.type === 'https' && info.api === true && info.uri)
-            .map(([, info]) => info.uri);
-        if (healthy.length > 0) {
-            cachedInstances = [...new Set([...healthy.slice(0, 8), ...FALLBACK_INSTANCES])];
-            cachedInstancesTime = Date.now();
-            return cachedInstances;
-        }
-    } catch (e) {
-        console.error(`[INVIDIOUS] Liste alınamadı, sabit liste kullanılıyor: ${e.message}`);
-    }
-    return FALLBACK_INSTANCES;
-}
-
-async function withInvidiousFallback(taskFn) {
-    const instances = await getInvidiousInstances();
-    let lastError;
-    for (const instance of instances) {
-        try {
-            return await taskFn(instance);
-        } catch (e) {
-            console.error(`[INVIDIOUS] ${instance} başarısız oldu: ${e.message}`);
-            lastError = e;
-        }
-    }
-    throw lastError || new Error('Tüm Invidious sunucuları engellenmiş veya çevrimdışı.');
-}
-
-async function invidiousSearch(instance, query) {
-    const results = await safeFetchJson(`${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=video`);
-    if (!results || results.length === 0) throw new Error('Şarkı bulunamadı.');
-    return results[0];
-}
-
-async function getInvidiousAudioInfo(instance, videoId) {
-    const data = await safeFetchJson(`${instance}/api/v1/videos/${videoId}`);
-    const audioFormats = (data.adaptiveFormats || []).filter(f => f.type && f.type.startsWith('audio'));
-    if (audioFormats.length === 0) throw new Error('Ses akışı bulunamadı.');
-    audioFormats.sort((a, b) => parseInt(b.bitrate || 0) - parseInt(a.bitrate || 0));
-    return {
-        title: data.title,
-        url: `https://www.youtube.com/watch?v=${videoId}`,
-        audioUrl: audioFormats[0].url,
-        durationRaw: formatDuration(data.lengthSeconds),
-        thumbnail: data.videoThumbnails && data.videoThumbnails.length > 0 ? data.videoThumbnails[0].url : null
-    };
-}
-
-// ==========================================
-// MÜZİK KAYNAĞI 3 (SON ÇARE): PIPED API
-// ==========================================
-const PIPED_INSTANCES = [
-    'https://pipedapi.kavin.rocks',
-    'https://pipedapi.syncpundit.io'
-];
-
-async function withPipedFallback(query, isId) {
-    let lastError;
-    for (const instance of PIPED_INSTANCES) {
-        try {
-            let videoId = query;
-            if (!isId) {
-                const searchData = await safeFetchJson(`${instance}/search?q=${encodeURIComponent(query)}&filter=all`);
-                const items = (searchData.items || []).filter(item => item.type === 'stream');
-                if (items.length === 0) throw new Error('Piped araması sonuç bulamadı.');
-                videoId = items[0].url.split('?v=')[1];
-            }
-            
-            const data = await safeFetchJson(`${instance}/streams/${videoId}`);
-            if (data.error) throw new Error(data.error);
-            
-            const audioFormats = (data.audioStreams || []).filter(s => s.url);
-            if (audioFormats.length === 0) throw new Error('Piped ses akışı bulamadı.');
-            
-            audioFormats.sort((a, b) => parseInt(b.bitrate || 0) - parseInt(a.bitrate || 0));
-            
-            return {
-                title: data.title || 'Bilinmeyen Şarkı',
-                url: `https://www.youtube.com/watch?v=${videoId}`,
-                audioUrl: audioFormats[0].url,
-                durationRaw: 'Bilinmiyor',
-                thumbnail: data.thumbnailUrl
-            };
-        } catch (e) {
-            console.error(`[PIPED] ${instance} başarısız: ${e.message}`);
-            lastError = e;
-        }
-    }
-    throw lastError || new Error('Tüm sistemler ve yedekler (yt-dlp, Invidious, Piped) YouTube tarafından reddedildi.');
 }
 
 // ==========================================
@@ -206,8 +74,13 @@ function extractYoutubeId(url) {
 }
 
 async function getSpotifyTrackName(url) {
-    const data = await safeFetchJson(`https://open.spotify.com/oembed?url=${encodeURIComponent(url)}`);
-    return data.title;
+    try {
+        const data = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(url)}`);
+        const json = await data.json();
+        return json.title || 'Spotify Şarkısı';
+    } catch {
+        return 'Spotify Şarkısı';
+    }
 }
 
 function formatDuration(seconds) {
@@ -234,18 +107,9 @@ function createFfmpegAudioStream(audioUrl) {
     });
 }
 
-// Render 7/24 Aktif Tutma Sunucusu
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.get('/', (req, res) => {
-    res.send('EvoBot 7/24 Aktif! Zırhlı Bağlantı Koruması Devrede.');
-});
-
-app.listen(PORT, () => {
-    console.log(`Web sunucusu ${PORT} portunda başarıyla başlatıldı.`);
-});
-
+// ==========================================
+// DISCORD CLIENT
+// ==========================================
 const client = new Client({ 
     intents: [
         GatewayIntentBits.Guilds, 
@@ -269,9 +133,12 @@ const serverBannedWords = new Map();
 
 client.once(Events.ClientReady, (readyClient) => {
     console.log(`[AKTİF] ${readyClient.user.tag} sisteme giriş yaptı. Geliştiriciler: Rizza & Emoc.`);
+    console.log(`[API] YouTube Audio API: ${YT_AUDIO_API_URL}`);
 });
 
-// Karşılama Sistemi
+// ==========================================
+// KARŞILAMA SİSTEMİ
+// ==========================================
 client.on(Events.GuildMemberAdd, async (member) => {
     const welcomeChannel = member.guild.systemChannel || member.guild.channels.cache.find(ch => ch.type === ChannelType.GuildText);
     if (!welcomeChannel) return;
@@ -287,6 +154,9 @@ client.on(Events.GuildMemberAdd, async (member) => {
     welcomeChannel.send({ embeds: [welcomeEmbed] }).catch((e) => console.error('[WELCOME]', e));
 });
 
+// ==========================================
+// MESAJ YAKALAYICI
+// ==========================================
 client.on(Events.MessageCreate, async (message) => {
     try {
         if (message.author.bot) return;
@@ -335,7 +205,8 @@ client.on(Events.MessageCreate, async (message) => {
                     { name: '📡 Gecikme', value: `${client.ws.ping}ms`, inline: true },
                     { name: '⏱️ Durum', value: '7/24 Aktif', inline: true },
                     { name: '🛡️ Sunucular', value: `${client.guilds.cache.size} Sunucu`, inline: true },
-                    { name: '👑 Geliştiriciler', value: 'Rizza ve Emoc', inline: false }
+                    { name: '👑 Geliştiriciler', value: 'Rizza ve Emoc', inline: false },
+                    { name: '🎵 Müzik API', value: YT_AUDIO_API_URL, inline: false }
                 )
                 .setFooter({ text: 'GitHub & Render Entegrasyonu' })
                 .setTimestamp();
@@ -383,7 +254,7 @@ client.on(Events.MessageCreate, async (message) => {
         }
 
         // ==========================================
-        // 2. MÜZİK SİSTEMİ 
+        // 2. MÜZİK SİSTEMİ (API ENTEGRASYONLU)
         // ==========================================
 
         if (command === '!spawn') {
@@ -407,42 +278,17 @@ client.on(Events.MessageCreate, async (message) => {
                     adapterCreator: message.guild.voiceAdapterCreator,
                 });
 
-                const loadingMsg = await message.reply("🔎 Zırhlı ağ üzerinden şarkı aranıyor ve yükleniyor...");
+                const loadingMsg = await message.reply("🔎 Özel API üzerinden şarkı aranıyor ve dönüştürülüyor...");
 
                 let searchQuery = query;
 
+                // Spotify linki ise başlığını al
                 if (query.includes('spotify.com')) {
                     searchQuery = await getSpotifyTrackName(query);
                 }
 
-                const ytId = extractYoutubeId(query);
-                const ytDlpQuery = ytId ? query : searchQuery;
-
-                let audioInfo;
-                
-                try {
-                    // Plan A: yt-dlp
-                    audioInfo = await getAudioViaYtDlp(ytDlpQuery);
-                } catch (ytdlpErr) {
-                    console.error(`[YT-DLP] Başarısız: ${ytdlpErr.message}. Invidious deneniyor...`);
-                    
-                    try {
-                        // Plan B: Invidious Ağı
-                        audioInfo = await withInvidiousFallback(async (instance) => {
-                            if (ytId) {
-                                return await getInvidiousAudioInfo(instance, ytId);
-                            } else {
-                                const found = await invidiousSearch(instance, searchQuery);
-                                return await getInvidiousAudioInfo(instance, found.videoId);
-                            }
-                        });
-                    } catch (invidiousErr) {
-                        console.error(`[INVIDIOUS] Başarısız: ${invidiousErr.message}. Piped deneniyor...`);
-                        
-                        // Plan C: Piped API Ağı
-                        audioInfo = await withPipedFallback(ytId || searchQuery, !!ytId);
-                    }
-                }
+                // API'den ses bilgisini al
+                const audioInfo = await getAudioFromMyApi(searchQuery);
 
                 const ffmpegStream = createFfmpegAudioStream(audioInfo.audioUrl);
                 const resource = createAudioResource(ffmpegStream, { inputType: StreamType.Raw });
@@ -464,10 +310,11 @@ client.on(Events.MessageCreate, async (message) => {
                     .setTitle('🎶 Müzik Başladı!')
                     .setColor(0x5865F2)
                     .setDescription(`**[${audioInfo.title}](${audioInfo.url})**`)
-                    .setThumbnail(audioInfo.thumbnail)
+                    .setThumbnail(audioInfo.thumbnail || client.user.displayAvatarURL())
                     .addFields(
                         { name: 'Kanal', value: `${voiceChannel.name}`, inline: true },
-                        { name: 'Süre', value: `${audioInfo.durationRaw}`, inline: true }
+                        { name: 'Süre', value: `${audioInfo.durationRaw}`, inline: true },
+                        { name: 'Kaynak', value: 'Özel YouTube Audio API', inline: true }
                     )
                     .setFooter({ text: `İsteyen: ${message.author.tag}`, iconURL: message.author.displayAvatarURL() })
                     .setTimestamp();
