@@ -6,34 +6,47 @@ const {
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType, getVoiceConnection } = require('@discordjs/voice');
 const prism = require('prism-media');
 const ffmpegPath = require('ffmpeg-static');
+const youtubedl = require('youtube-dl-exec');
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const HttpsProxyAgent = require('https-proxy-agent');
 require('dotenv').config();
 
 // ==========================================
-// YT-AUDIO-API (INVIDIOUS TABANLI)
+// PROXY/VPN KONFIGÜRASYONU
+// ==========================================
+// ÜCRETSİZ PROXY LİSTESİ (güvenilir olmayabilir)
+// Öneri: Kendi VPN'ini veya özel proxy'ni kullan
+const PROXY_LIST = [
+    // Buraya kendi proxy/VPN adreslerini ekle
+    // 'http://user:pass@proxy.example.com:8080',
+    // 'socks5://user:pass@proxy.example.com:1080',
+];
+
+// VEYA doğrudan proxy kullan
+const USE_PROXY = process.env.USE_PROXY || 'false';
+const PROXY_URL = process.env.PROXY_URL || '';
+
+// ==========================================
+// YT-DLP İLE DOĞRUDAN İNDİRME (PROXY DESTEKLİ)
 // ==========================================
 const API_PORT = process.env.API_PORT || 3001;
 const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
-const TOKEN_EXPIRY = 5 * 60 * 1000; // 5 dakika
+const TOKEN_EXPIRY = 5 * 60 * 1000;
 
-// Token ve dosya yönetimi
 const tokens = new Map();
 
-// Klasörü oluştur
 if (!fs.existsSync(DOWNLOAD_DIR)) {
     fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
 }
 
-// Token oluştur
 function generateToken() {
     return crypto.randomBytes(16).toString('base64url');
 }
 
-// Eski dosyaları temizle
 function cleanupExpiredFiles() {
     const now = Date.now();
     for (const [token, data] of tokens.entries()) {
@@ -42,145 +55,60 @@ function cleanupExpiredFiles() {
                 if (fs.existsSync(data.filePath)) {
                     fs.unlinkSync(data.filePath);
                 }
-            } catch (e) {
-                console.error('[CLEANUP] Dosya silinemedi:', e);
-            }
+            } catch (e) {}
             tokens.delete(token);
         }
     }
 }
 
-// Periyodik temizlik (her 5 dakika)
 setInterval(cleanupExpiredFiles, 5 * 60 * 1000);
 
 // ==========================================
-// GELİŞMİŞ INVIDIOUS API FONKSİYONLARI
+// YT-DLP İLE İNDİR (PROXY DESTEKLİ)
 // ==========================================
-const INVIDIOUS_INSTANCES = [
-    'https://invidious.projectsegfau.lt',
-    'https://inv.tux.pizza',
-    'https://invidious.drgns.space',
-    'https://inv.nadeko.net',
-    'https://invidious.nerdvpn.de',
-    'https://invidious.tiekoetter.com',
-    'https://invidious.webovernight.com',
-    'https://invidious.esmailelbob.xyz'
-];
+async function downloadWithYtDlp(url) {
+    // Proxy ayarları
+    const proxyArgs = [];
+    if (USE_PROXY === 'true' && PROXY_URL) {
+        proxyArgs.push('--proxy', PROXY_URL);
+        console.log(`[YT-DLP] Proxy kullanılıyor: ${PROXY_URL}`);
+    }
 
-async function fetchJson(url) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-    
     try {
-        const response = await fetch(url, {
-            signal: controller.signal,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'application/json'
-            }
+        // Önce video bilgilerini al (proxy ile)
+        const info = await youtubedl(url, {
+            dumpSingleJson: true,
+            noCheckCertificates: true,
+            noWarnings: true,
+            preferFreeFormats: true,
+            format: 'bestaudio/best',
+            addHeader: [
+                'referer:https://www.youtube.com',
+                'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            ],
+            // Proxy parametreleri
+            ...(USE_PROXY === 'true' && PROXY_URL ? { proxy: PROXY_URL } : {})
         });
-        
-        clearTimeout(timeout);
-        
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
+
+        if (!info || !info.url) {
+            throw new Error('Ses akışı bulunamadı');
         }
-        
-        const text = await response.text();
-        
-        // JSON olup olmadığını kontrol et
-        if (!text.trim().startsWith('{') && !text.trim().startsWith('[')) {
-            throw new Error('Sunucu JSON döndürmedi (muhtemelen kapalı)');
-        }
-        
-        return JSON.parse(text);
+
+        return {
+            title: info.title || 'Bilinmeyen Şarkı',
+            audioUrl: info.url,
+            duration: info.duration || 0,
+            thumbnail: info.thumbnail || null
+        };
+
     } catch (error) {
-        clearTimeout(timeout);
+        console.error('[YT-DLP] Hata:', error);
         throw error;
     }
 }
 
-async function getVideoInfo(videoId) {
-    let lastError;
-    
-    for (const instance of INVIDIOUS_INSTANCES) {
-        try {
-            const url = `${instance}/api/v1/videos/${videoId}`;
-            console.log(`[INVIDIOUS] ${instance} deneniyor...`);
-            
-            const data = await fetchJson(url);
-            
-            if (!data || data.error) {
-                continue;
-            }
-            
-            // Ses formatlarını bul
-            const audioFormats = (data.adaptiveFormats || [])
-                .filter(f => {
-                    if (!f || !f.type) return false;
-                    return f.type.startsWith('audio/mp4') || 
-                           f.type.startsWith('audio/webm') ||
-                           f.type.startsWith('audio/mpeg');
-                });
-            
-            if (audioFormats.length === 0) {
-                console.log(`[INVIDIOUS] ${instance} ses formatı bulunamadı`);
-                continue;
-            }
-            
-            // En yüksek bitrate'li sesi seç
-            audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-            const bestAudio = audioFormats[0];
-            
-            console.log(`[INVIDIOUS] ✅ ${instance} başarılı!`);
-            
-            return {
-                title: data.title || 'Bilinmeyen Şarkı',
-                audioUrl: bestAudio.url,
-                duration: data.lengthSeconds || 0,
-                thumbnail: data.videoThumbnails?.[0]?.url || null
-            };
-        } catch (e) {
-            lastError = e;
-            console.log(`[INVIDIOUS] ❌ ${instance} başarısız:`, e.message);
-        }
-    }
-    
-    throw lastError || new Error('Tüm Invidious sunucuları başarısız');
-}
-
-async function searchVideo(query) {
-    let lastError;
-    
-    for (const instance of INVIDIOUS_INSTANCES) {
-        try {
-            const url = `${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=video&sort=relevance`;
-            console.log(`[INVIDIOUS SEARCH] ${instance} deneniyor...`);
-            
-            const data = await fetchJson(url);
-            
-            if (!data || data.length === 0) {
-                continue;
-            }
-            
-            const video = data[0];
-            if (!video || !video.videoId) {
-                continue;
-            }
-            
-            console.log(`[INVIDIOUS SEARCH] ✅ ${instance} başarılı!`);
-            return video.videoId;
-        } catch (e) {
-            lastError = e;
-            console.log(`[INVIDIOUS SEARCH] ❌ ${instance} başarısız:`, e.message);
-        }
-    }
-    
-    throw lastError || new Error('Arama sonucu bulunamadı');
-}
-
 // ==========================================
-// EXPRESS API SUNUCUSU (BOT İÇİNDE)
+// EXPRESS API
 // ==========================================
 const apiApp = express();
 
@@ -193,47 +121,58 @@ apiApp.get('/', async (req, res) => {
     try {
         console.log(`[API] İstek: ${url}`);
         
-        // YouTube video ID'sini çıkar
-        let videoId = url;
-        const idMatch = url.match(/(?:v=|\/)([a-zA-Z0-9_-]{11})/);
-        if (idMatch) {
-            videoId = idMatch[1];
-        } else {
-            // YouTube linki değilse arama yap
-            videoId = await searchVideo(url);
+        // YouTube linkini düzenle (si parametrelerini temizle)
+        let cleanUrl = url;
+        if (url.includes('youtu.be')) {
+            const idMatch = url.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/);
+            if (idMatch) {
+                cleanUrl = `https://www.youtube.com/watch?v=${idMatch[1]}`;
+            }
+        } else if (url.includes('youtube.com/watch')) {
+            const idMatch = url.match(/v=([a-zA-Z0-9_-]{11})/);
+            if (idMatch) {
+                cleanUrl = `https://www.youtube.com/watch?v=${idMatch[1]}`;
+            }
         }
 
-        console.log(`[API] Video ID: ${videoId}`);
+        // yt-dlp ile indir
+        const info = await downloadWithYtDlp(cleanUrl);
         
-        // Video bilgilerini al
-        const info = await getVideoInfo(videoId);
-        if (!info || !info.audioUrl) {
-            throw new Error('Ses akışı bulunamadı');
-        }
-
         const token = generateToken();
         const filename = `${token}.mp3`;
         const filePath = path.join(DOWNLOAD_DIR, filename);
 
         console.log(`[API] Ses indiriliyor: ${info.audioUrl.substring(0, 50)}...`);
-        
-        // Ses dosyasını indir
-        const audioRes = await fetch(info.audioUrl, {
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-        });
-        
+
+        // Ses dosyasını indir (proxy ile)
+        let audioRes;
+        if (USE_PROXY === 'true' && PROXY_URL) {
+            // Proxy ile fetch
+            const agent = new HttpsProxyAgent(PROXY_URL);
+            audioRes = await fetch(info.audioUrl, {
+                agent: agent,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            });
+        } else {
+            audioRes = await fetch(info.audioUrl, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+            });
+        }
+
         if (!audioRes.ok) {
             throw new Error(`İndirme hatası: ${audioRes.status}`);
         }
-        
+
         const buffer = await audioRes.arrayBuffer();
         const tempPath = filePath + '.temp';
         fs.writeFileSync(tempPath, Buffer.from(buffer));
-        
+
         console.log(`[API] FFmpeg ile MP3'e dönüştürülüyor...`);
-        
+
         // FFmpeg ile MP3'e dönüştür
         await new Promise((resolve, reject) => {
             const ffmpeg = spawn(ffmpegPath, [
@@ -244,22 +183,19 @@ apiApp.get('/', async (req, res) => {
                 '-ac', '2',
                 filePath
             ]);
-            
+
             ffmpeg.on('close', (code) => {
                 if (code === 0) {
-                    try {
-                        fs.unlinkSync(tempPath);
-                    } catch (e) {}
+                    try { fs.unlinkSync(tempPath); } catch (e) {}
                     resolve();
                 } else {
                     reject(new Error(`FFmpeg hatası: ${code}`));
                 }
             });
-            
+
             ffmpeg.on('error', reject);
         });
 
-        // Token'ı kaydet
         tokens.set(token, {
             filePath: filePath,
             filename: filename,
@@ -271,12 +207,16 @@ apiApp.get('/', async (req, res) => {
         res.json({ 
             token: token,
             title: info.title,
-            duration: info.duration
+            duration: info.duration,
+            thumbnail: info.thumbnail
         });
 
     } catch (error) {
         console.error('[API] ❌ Hata:', error);
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ 
+            error: error.message || 'Bilinmeyen hata',
+            details: error.stack
+        });
     }
 });
 
@@ -303,10 +243,12 @@ apiApp.get('/download', (req, res) => {
     });
 });
 
-// API sunucusunu başlat
 apiApp.listen(API_PORT, '0.0.0.0', () => {
     console.log(`[API] YouTube Audio API ${API_PORT} portunda başlatıldı.`);
-    console.log(`[API] Invidious sunucuları: ${INVIDIOUS_INSTANCES.length} adet`);
+    console.log(`[API] Proxy durumu: ${USE_PROXY === 'true' ? 'AKTİF' : 'PASİF'}`);
+    if (USE_PROXY === 'true' && PROXY_URL) {
+        console.log(`[API] Proxy: ${PROXY_URL}`);
+    }
 });
 
 // ==========================================
@@ -316,7 +258,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-    res.send('EvoBot 7/24 Aktif! Invidious tabanlı YouTube Audio API entegre.');
+    res.send('EvoBot 7/24 Aktif! yt-dlp + Proxy entegre.');
 });
 
 app.listen(PORT, '0.0.0.0', () => {
@@ -324,7 +266,7 @@ app.listen(PORT, '0.0.0.0', () => {
 });
 
 // ==========================================
-// DISCORD BOT
+// DISCORD BOT (AYNI)
 // ==========================================
 const client = new Client({ 
     intents: [
@@ -344,7 +286,6 @@ const client = new Client({
 client.on('error', (err) => console.error('[CLIENT ERROR]', err));
 process.on('unhandledRejection', (err) => console.error('[UNHANDLED REJECTION]', err));
 
-// Sunucu ID -> Yasaklı Kelimeler Listesi
 const serverBannedWords = new Map();
 
 client.once(Events.ClientReady, (readyClient) => {
@@ -398,7 +339,7 @@ function formatDuration(seconds) {
 }
 
 // ==========================================
-// MESAJ YAKALAYICI
+// MESAJ YAKALAYICI (KISALTILMIŞ)
 // ==========================================
 client.on(Events.MessageCreate, async (message) => {
     try {
@@ -449,7 +390,7 @@ client.on(Events.MessageCreate, async (message) => {
                     { name: '⏱️ Durum', value: '7/24 Aktif', inline: true },
                     { name: '🛡️ Sunucular', value: `${client.guilds.cache.size} Sunucu`, inline: true },
                     { name: '👑 Geliştiriciler', value: 'Rizza ve Emoc', inline: false },
-                    { name: '🎵 Müzik Sistemi', value: 'Invidious API (Entegre)', inline: false }
+                    { name: '🎵 Müzik Sistemi', value: 'yt-dlp + Proxy (Entegre)', inline: false }
                 )
                 .setFooter({ text: 'GitHub & Render Entegrasyonu' })
                 .setTimestamp();
@@ -497,7 +438,7 @@ client.on(Events.MessageCreate, async (message) => {
         }
 
         // ==========================================
-        // 2. MÜZİK SİSTEMİ (INVIDIOUS TABANLI)
+        // 2. MÜZİK SİSTEMİ (YT-DLP + PROXY)
         // ==========================================
 
         if (command === '!spawn') {
@@ -521,7 +462,7 @@ client.on(Events.MessageCreate, async (message) => {
                     adapterCreator: message.guild.voiceAdapterCreator,
                 });
 
-                const loadingMsg = await message.reply("🔎 Invidious üzerinden şarkı aranıyor ve dönüştürülüyor...");
+                const loadingMsg = await message.reply("🔎 YouTube'dan ses alınıyor ve MP3'e dönüştürülüyor...");
 
                 // API'ye istek at
                 const apiUrl = `http://localhost:${API_PORT}/?url=${encodeURIComponent(query)}`;
@@ -558,10 +499,11 @@ client.on(Events.MessageCreate, async (message) => {
                     .setTitle('🎶 Müzik Başladı!')
                     .setColor(0x5865F2)
                     .setDescription(`**[${title}](${query})**`)
+                    .setThumbnail(data.thumbnail || client.user.displayAvatarURL())
                     .addFields(
                         { name: 'Kanal', value: `${voiceChannel.name}`, inline: true },
                         { name: 'Süre', value: duration, inline: true },
-                        { name: 'Kaynak', value: 'Invidious API (Entegre)', inline: true }
+                        { name: 'Kaynak', value: 'yt-dlp + Proxy (Entegre)', inline: true }
                     )
                     .setFooter({ text: `İsteyen: ${message.author.tag}`, iconURL: message.author.displayAvatarURL() })
                     .setTimestamp();
