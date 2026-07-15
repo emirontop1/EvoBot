@@ -3,8 +3,9 @@ const {
     StringSelectMenuBuilder, StringSelectMenuOptionBuilder, ComponentType, 
     ChannelType, PermissionsBitField, Events 
 } = require('discord.js');
-const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, getVoiceConnection } = require('@discordjs/voice');
-const play = require('play-dl');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType, getVoiceConnection } = require('@discordjs/voice');
+const prism = require('prism-media');
+const ffmpegPath = require('ffmpeg-static');
 const express = require('express');
 require('dotenv').config();
 
@@ -14,6 +15,100 @@ require('dotenv').config();
 // açık olmalı, yoksa aşağıdaki kod hiç çalışmaz
 // (message.content boş gelir, komutlar tetiklenmez).
 // ==========================================
+
+// ==========================================
+// MÜZİK KAYNAĞI: INVIDIOUS (ücretsiz, cookie/hesap gerektirmez)
+// play-dl yerine YouTube'un önündeki açık kaynak Invidious ağı
+// kullanılıyor, böylece "sign in to confirm you're not a bot"
+// hatası hiç oluşmuyor.
+// ==========================================
+let cachedInvidiousInstance = null;
+let cachedInstanceTime = 0;
+
+async function getInvidiousInstance() {
+    // 10 dakikada bir tazele, her seferinde sorgulama
+    if (cachedInvidiousInstance && Date.now() - cachedInstanceTime < 10 * 60 * 1000) {
+        return cachedInvidiousInstance;
+    }
+    try {
+        const res = await fetch('https://api.invidious.io/instances.json?sort_by=health');
+        const data = await res.json();
+        const healthy = data
+            .filter(([, info]) => info.type === 'https' && info.api === true && info.uri)
+            .map(([, info]) => info.uri);
+        if (healthy.length > 0) {
+            cachedInvidiousInstance = healthy[0];
+            cachedInstanceTime = Date.now();
+            return cachedInvidiousInstance;
+        }
+    } catch (e) {
+        console.error('[INVIDIOUS] Instance listesi alınamadı:', e.message);
+    }
+    // Bilinen bir yedek instance
+    return 'https://inv.nadeko.net';
+}
+
+function extractYoutubeId(url) {
+    const match = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/|shorts\/))([a-zA-Z0-9_-]{11})/);
+    return match ? match[1] : null;
+}
+
+async function getSpotifyTrackName(url) {
+    // Spotify API anahtarı gerektirmeyen resmi oEmbed uç noktası
+    const res = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(url)}`);
+    if (!res.ok) throw new Error('Spotify oEmbed başarısız oldu.');
+    const data = await res.json();
+    return data.title; // örn: "Şarkı Adı - Sanatçı"
+}
+
+async function invidiousSearch(instance, query) {
+    const res = await fetch(`${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=video`);
+    if (!res.ok) throw new Error('Invidious araması başarısız oldu.');
+    const results = await res.json();
+    if (!results || results.length === 0) throw new Error('Şarkı bulunamadı.');
+    return results[0]; // { videoId, title, author, videoThumbnails, lengthSeconds, ... }
+}
+
+async function getInvidiousAudioInfo(instance, videoId) {
+    const res = await fetch(`${instance}/api/v1/videos/${videoId}`);
+    if (!res.ok) throw new Error('Video bilgisi alınamadı.');
+    const data = await res.json();
+    const audioFormats = (data.adaptiveFormats || []).filter(f => f.type && f.type.startsWith('audio'));
+    if (audioFormats.length === 0) throw new Error('Ses akışı bulunamadı.');
+    // En yüksek bitrate'li ses akışını seç
+    audioFormats.sort((a, b) => parseInt(b.bitrate || 0) - parseInt(a.bitrate || 0));
+    return {
+        title: data.title,
+        url: `https://www.youtube.com/watch?v=${videoId}`,
+        audioUrl: audioFormats[0].url,
+        durationRaw: formatDuration(data.lengthSeconds),
+        thumbnail: data.videoThumbnails && data.videoThumbnails.length > 0 ? data.videoThumbnails[0].url : null
+    };
+}
+
+function formatDuration(seconds) {
+    if (!seconds) return 'Bilinmiyor';
+    const m = Math.floor(seconds / 60);
+    const s = seconds % 60;
+    return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function createFfmpegAudioStream(audioUrl) {
+    return new prism.FFmpeg({
+        command: ffmpegPath,
+        args: [
+            '-reconnect', '1',
+            '-reconnect_streamed', '1',
+            '-reconnect_delay_max', '5',
+            '-i', audioUrl,
+            '-analyzeduration', '0',
+            '-loglevel', '0',
+            '-f', 's16le',
+            '-ar', '48000',
+            '-ac', '2',
+        ],
+    });
+}
 
 // Render 7/24 Aktif Tutma Sunucusu
 const app = express();
@@ -190,36 +285,25 @@ client.on(Events.MessageCreate, async (message) => {
 
                 const loadingMsg = await message.reply("🔎 Şarkı aranıyor ve yükleniyor, lütfen bekleyin...");
 
-                let ytInfo;
-                let stream;
+                const instance = await getInvidiousInstance();
+                let searchQuery = query;
 
                 if (query.includes('spotify.com')) {
-                    // NOT: play-dl'de Spotify desteği için play.setToken() ile
-                    // client_id/client_secret ayarlanmış olması gerekir, yoksa burası patlar.
-                    try {
-                        const sp_data = await play.spotify(query);
-                        const search = await play.search(`${sp_data.name} ${sp_data.artists[0]?.name}`, { limit: 1 });
-                        if (!search || search.length === 0) throw new Error("Şarkı bulunamadı.");
-                        ytInfo = search[0];
-                        stream = await play.stream(ytInfo.url);
-                    } catch (spErr) {
-                        console.error('[SPOTIFY]', spErr);
-                        connection.destroy();
-                        await loadingMsg.delete().catch(() => {});
-                        return message.reply("❌ Spotify linki işlenemedi. Spotify API anahtarları (`play.setToken`) ayarlı değil olabilir — bunun yerine şarkı adını veya bir YouTube linki dene.");
-                    }
-                } else if (query.includes('youtube.com') || query.includes('youtu.be')) {
-                    const info = await play.video_info(query);
-                    ytInfo = info.video_details;
-                    stream = await play.stream(query);
-                } else {
-                    const search = await play.search(query, { limit: 1 });
-                    if (!search || search.length === 0) throw new Error("Şarkı bulunamadı.");
-                    ytInfo = search[0];
-                    stream = await play.stream(ytInfo.url);
+                    // Spotify API anahtarı gerektirmeyen resmi oEmbed uç noktasından şarkı adını al
+                    searchQuery = await getSpotifyTrackName(query);
                 }
 
-                const resource = createAudioResource(stream.stream, { inputType: stream.type });
+                let audioInfo;
+                const ytId = extractYoutubeId(query);
+                if (ytId) {
+                    audioInfo = await getInvidiousAudioInfo(instance, ytId);
+                } else {
+                    const found = await invidiousSearch(instance, searchQuery);
+                    audioInfo = await getInvidiousAudioInfo(instance, found.videoId);
+                }
+
+                const ffmpegStream = createFfmpegAudioStream(audioInfo.audioUrl);
+                const resource = createAudioResource(ffmpegStream, { inputType: StreamType.Raw });
                 const player = createAudioPlayer();
 
                 player.play(resource);
@@ -234,16 +318,14 @@ client.on(Events.MessageCreate, async (message) => {
                     connection.destroy();
                 });
 
-                const thumbnail = ytInfo.thumbnails && ytInfo.thumbnails.length > 0 ? ytInfo.thumbnails[0].url : null;
-
                 const playEmbed = new EmbedBuilder()
                     .setTitle('🎶 Müzik Başladı!')
                     .setColor(0x5865F2)
-                    .setDescription(`**[${ytInfo.title}](${ytInfo.url})**`)
-                    .setThumbnail(thumbnail)
+                    .setDescription(`**[${audioInfo.title}](${audioInfo.url})**`)
+                    .setThumbnail(audioInfo.thumbnail)
                     .addFields(
                         { name: 'Kanal', value: `${voiceChannel.name}`, inline: true },
-                        { name: 'Süre', value: `${ytInfo.durationRaw || 'Bilinmiyor'}`, inline: true }
+                        { name: 'Süre', value: `${audioInfo.durationRaw}`, inline: true }
                     )
                     .setFooter({ text: `İsteyen: ${message.author.tag}`, iconURL: message.author.displayAvatarURL() })
                     .setTimestamp();
