@@ -1,0 +1,10 @@
+{
+  "name": "Evo-Bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "dependencies": {
+    "discord.js": "^14.0.0",
+    "@supabase/supabase-js": "^2.0.0"
+  }
+}
+
