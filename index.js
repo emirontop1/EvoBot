@@ -6,6 +6,7 @@ const {
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, StreamType, getVoiceConnection } = require('@discordjs/voice');
 const prism = require('prism-media');
 const ffmpegPath = require('ffmpeg-static');
+const youtubedl = require('youtube-dl-exec');
 const express = require('express');
 require('dotenv').config();
 
@@ -17,7 +18,42 @@ require('dotenv').config();
 // ==========================================
 
 // ==========================================
-// MÜZİK KAYNAĞI: INVIDIOUS (ücretsiz, cookie/hesap gerektirmez)
+// MÜZİK KAYNAĞI 1 (BİRİNCİL): yt-dlp
+// Topluluk tarafından çok aktif güncellenen bir araç — YouTube
+// engelleri değiştikçe genelde saatler içinde yama alıyor. Bu yüzden
+// play-dl/Invidious'tan daha dayanıklı. Cookie/hesap gerekmiyor.
+// ==========================================
+async function getAudioViaYtDlp(query) {
+    const isUrl = /^https?:\/\//.test(query);
+    const target = isUrl ? query : `ytsearch1:${query}`;
+
+    const output = await youtubedl(target, {
+        dumpSingleJson: true,
+        noCheckCertificates: true,
+        noWarnings: true,
+        preferFreeFormats: true,
+        format: 'bestaudio/best',
+        addHeader: ['referer:youtube.com', 'user-agent:googlebot']
+    });
+
+    const info = (output && Array.isArray(output.entries)) ? output.entries[0] : output;
+    if (!info || !info.url) throw new Error('yt-dlp ses akışı bulamadı.');
+
+    const thumb = info.thumbnail || (Array.isArray(info.thumbnails) && info.thumbnails.length > 0
+        ? info.thumbnails[info.thumbnails.length - 1].url
+        : null);
+
+    return {
+        title: info.title || 'Bilinmeyen şarkı',
+        url: info.webpage_url || info.original_url || (info.id ? `https://www.youtube.com/watch?v=${info.id}` : target),
+        audioUrl: info.url,
+        durationRaw: formatDuration(info.duration),
+        thumbnail: thumb
+    };
+}
+
+// ==========================================
+// MÜZİK KAYNAĞI 2 (YEDEK): INVIDIOUS (ücretsiz, cookie/hesap gerektirmez)
 // play-dl yerine YouTube'un önündeki açık kaynak Invidious ağı
 // kullanılıyor, böylece "sign in to confirm you're not a bot"
 // hatası hiç oluşmuyor. Tek sunucuya güvenmek yerine birden
@@ -330,14 +366,22 @@ client.on(Events.MessageCreate, async (message) => {
                 }
 
                 const ytId = extractYoutubeId(query);
-                const audioInfo = await withInvidiousFallback(async (instance) => {
-                    if (ytId) {
-                        return await getInvidiousAudioInfo(instance, ytId);
-                    } else {
-                        const found = await invidiousSearch(instance, searchQuery);
-                        return await getInvidiousAudioInfo(instance, found.videoId);
-                    }
-                });
+                const ytDlpQuery = ytId ? query : searchQuery;
+
+                let audioInfo;
+                try {
+                    audioInfo = await getAudioViaYtDlp(ytDlpQuery);
+                } catch (ytdlpErr) {
+                    console.error(`[YT-DLP] başarısız, Invidious'a düşülüyor: ${ytdlpErr.message}`);
+                    audioInfo = await withInvidiousFallback(async (instance) => {
+                        if (ytId) {
+                            return await getInvidiousAudioInfo(instance, ytId);
+                        } else {
+                            const found = await invidiousSearch(instance, searchQuery);
+                            return await getInvidiousAudioInfo(instance, found.videoId);
+                        }
+                    });
+                }
 
                 const ffmpegStream = createFfmpegAudioStream(audioInfo.audioUrl);
                 const resource = createAudioResource(ffmpegStream, { inputType: StreamType.Raw });
