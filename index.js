@@ -11,28 +11,33 @@ const express = require('express');
 require('dotenv').config();
 
 // ==========================================
+// WARP VPN (Cloudflare WARP) PROXY AYARI
+// ==========================================
+// WARP-CLI kullanarak oluşturduğunuz yerel SOCKS5 proxy adresiniz.
+// Eğer .env dosyanızda WARP_PROXY belirtilmişse onu alır, yoksa varsayılan WARP portunu dener.
+const WARP_PROXY_URL = process.env.WARP_PROXY || 'socks5://127.0.0.1:40000';
+
+// ==========================================
 // ÖNEMLİ: Discord Developer Portal -> Bot sekmesinde
 // "MESSAGE CONTENT INTENT" ve "SERVER MEMBERS INTENT"
-// açık olmalı, yoksa aşağıdaki kod hiç çalışmaz
-// (message.content boş gelir, komutlar tetiklenmez).
+// açık olmalı, yoksa aşağıdaki kod hiç çalışmaz.
 // ==========================================
 
 // ==========================================
-// MÜZİK KAYNAĞI 1 (BİRİNCİL): yt-dlp
-// Topluluk tarafından çok aktif güncellenen bir araç — YouTube
-// engelleri değiştikçe genelde saatler içinde yama alıyor. Bu yüzden
-// play-dl/Invidious'tan daha dayanıklı. Cookie/hesap gerekmiyor.
+// MÜZİK KAYNAĞI 1 (BİRİNCİL): yt-dlp + WARP VPN
 // ==========================================
 async function getAudioViaYtDlp(query) {
     const isUrl = /^https?:\/\//.test(query);
     const target = isUrl ? query : `ytsearch1:${query}`;
 
+    // WARP VPN ayarı burada `proxy` parametresi ile YouTube'a istek atarken kullanılıyor.
     const output = await youtubedl(target, {
         dumpSingleJson: true,
         noCheckCertificates: true,
         noWarnings: true,
         preferFreeFormats: true,
         format: 'bestaudio/best',
+        proxy: WARP_PROXY_URL, 
         addHeader: ['referer:youtube.com', 'user-agent:googlebot']
     });
 
@@ -53,14 +58,7 @@ async function getAudioViaYtDlp(query) {
 }
 
 // ==========================================
-// MÜZİK KAYNAĞI 2 (YEDEK): INVIDIOUS (ücretsiz, cookie/hesap gerektirmez)
-// play-dl yerine YouTube'un önündeki açık kaynak Invidious ağı
-// kullanılıyor, böylece "sign in to confirm you're not a bot"
-// hatası hiç oluşmuyor. Tek sunucuya güvenmek yerine birden
-// fazla sunucu denenir çünkü public instance'lar sık kesintiye uğrar.
-// NOT: 2026'da YouTube'un baskısı yüzünden public instance sayısı
-// azaldı; bazıları da CAPTCHA/bot-koruması eklemiş durumda. Bu yüzden
-// bu yöntem de %100 garanti değil, ama en güncel resmi listeyi kullanıyoruz.
+// MÜZİK KAYNAĞI 2 (YEDEK): INVIDIOUS
 // ==========================================
 let cachedInstances = null;
 let cachedInstancesTime = 0;
@@ -94,18 +92,16 @@ async function getInvidiousInstances() {
             .filter(([, info]) => info.type === 'https' && info.api === true && info.uri)
             .map(([, info]) => info.uri);
         if (healthy.length > 0) {
-            // Bilinen sabit yedekleri de listenin sonuna ekle
             cachedInstances = [...new Set([...healthy.slice(0, 6), ...FALLBACK_INSTANCES])];
             cachedInstancesTime = Date.now();
             return cachedInstances;
         }
     } catch (e) {
-        console.error(`[INVIDIOUS] Instance listesi alınamadı: ${e.message} (cause: ${e.cause?.code || e.cause?.message || 'yok'})`);
+        console.error(`[INVIDIOUS] Instance listesi alınamadı: ${e.message}`);
     }
     return FALLBACK_INSTANCES;
 }
 
-// Birden fazla instance'ı sırayla dener, ilk başarılı olanı kullanır
 async function withInvidiousFallback(taskFn) {
     const instances = await getInvidiousInstances();
     let lastError;
@@ -113,7 +109,7 @@ async function withInvidiousFallback(taskFn) {
         try {
             return await taskFn(instance);
         } catch (e) {
-            console.error(`[INVIDIOUS] ${instance} başarısız: ${e.message} (cause: ${e.cause?.code || e.cause?.message || 'yok'})`);
+            console.error(`[INVIDIOUS] ${instance} başarısız: ${e.message}`);
             lastError = e;
         }
     }
@@ -126,11 +122,10 @@ function extractYoutubeId(url) {
 }
 
 async function getSpotifyTrackName(url) {
-    // Spotify API anahtarı gerektirmeyen resmi oEmbed uç noktası
     const res = await fetch(`https://open.spotify.com/oembed?url=${encodeURIComponent(url)}`);
     if (!res.ok) throw new Error('Spotify oEmbed başarısız oldu.');
     const data = await res.json();
-    return data.title; // örn: "Şarkı Adı - Sanatçı"
+    return data.title;
 }
 
 async function invidiousSearch(instance, query) {
@@ -138,7 +133,7 @@ async function invidiousSearch(instance, query) {
     if (!res.ok) throw new Error(`Invidious araması başarısız oldu (HTTP ${res.status}).`);
     const results = await res.json();
     if (!results || results.length === 0) throw new Error('Şarkı bulunamadı.');
-    return results[0]; // { videoId, title, author, videoThumbnails, lengthSeconds, ... }
+    return results[0];
 }
 
 async function getInvidiousAudioInfo(instance, videoId) {
@@ -147,7 +142,6 @@ async function getInvidiousAudioInfo(instance, videoId) {
     const data = await res.json();
     const audioFormats = (data.adaptiveFormats || []).filter(f => f.type && f.type.startsWith('audio'));
     if (audioFormats.length === 0) throw new Error('Ses akışı bulunamadı.');
-    // En yüksek bitrate'li ses akışını seç
     audioFormats.sort((a, b) => parseInt(b.bitrate || 0) - parseInt(a.bitrate || 0));
     return {
         title: data.title,
@@ -155,7 +149,6 @@ async function getInvidiousAudioInfo(instance, videoId) {
         audioUrl: audioFormats[0].url,
         durationRaw: formatDuration(data.lengthSeconds),
         thumbnail: data.videoThumbnails && data.videoThumbnails.length > 0 ? data.videoThumbnails[0].url : null
-
     };
 }
 
@@ -188,7 +181,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-    res.send('EvoBot 7/24 Aktif!');
+    res.send('EvoBot 7/24 Aktif! WARP VPN Koruması Devrede.');
 });
 
 app.listen(PORT, () => {
@@ -332,7 +325,7 @@ client.on(Events.MessageCreate, async (message) => {
         }
 
         // ==========================================
-        // 2. MÜZİK SİSTEMİ (TOKENSIZ / YOUTUBE & SPOTIFY)
+        // 2. MÜZİK SİSTEMİ
         // ==========================================
 
         if (command === '!spawn') {
@@ -356,12 +349,11 @@ client.on(Events.MessageCreate, async (message) => {
                     adapterCreator: message.guild.voiceAdapterCreator,
                 });
 
-                const loadingMsg = await message.reply("🔎 Şarkı aranıyor ve yükleniyor, lütfen bekleyin...");
+                const loadingMsg = await message.reply("🔎 Şarkı aranıyor ve WARP VPN üzerinden yükleniyor, lütfen bekleyin...");
 
                 let searchQuery = query;
 
                 if (query.includes('spotify.com')) {
-                    // Spotify API anahtarı gerektirmeyen resmi oEmbed uç noktasından şarkı adını al
                     searchQuery = await getSpotifyTrackName(query);
                 }
 
@@ -442,7 +434,6 @@ client.on(Events.MessageCreate, async (message) => {
                 return message.reply("❌ Bu komut için `Mesajları Yönet` yetkisine sahip olmalısın.");
             }
             const amount = parseInt(args[0]);
-            // Discord API bulkDelete minimum 2 mesaj ister
             if (isNaN(amount) || amount < 2 || amount > 100) {
                 return message.reply("Lütfen 2 ile 100 arasında bir değer belirtin. Örn: `!clear 15`");
             }
@@ -465,7 +456,6 @@ client.on(Events.MessageCreate, async (message) => {
             setTimeout(() => successMsg.delete().catch(() => {}), 3000);
             return;
         }
-
         if (command === '!kick') {
             if (message.channel.type === ChannelType.DM) return;
             if (!message.member.permissions.has(PermissionsBitField.Flags.KickMembers)) {
@@ -562,7 +552,7 @@ client.on(Events.MessageCreate, async (message) => {
                     await interaction.reply({ embeds: [new EmbedBuilder().setTitle('📝 Kelime Belirleme').setColor(0x57F287).setDescription(`**${guildName}** seçildi!\n\nLütfen yasaklamak istediğin kelimeyi (tek kelime) buraya yaz. *(30 saniye)*`)] });
 
                     const filter = m => m.author.id === message.author.id;
-                    const collected = await message.channel.awaitMessages({ filter, max: 1, time: 30000 });
+                    const collected = await interaction.channel.awaitMessages({ filter, max: 1, time: 30000 });
 
                     if (collected.size > 0) {
                         const word = collected.first().content.toLowerCase();
@@ -570,9 +560,9 @@ client.on(Events.MessageCreate, async (message) => {
                         if (!list.includes(word)) list.push(word);
                         serverBannedWords.set(guildId, list);
 
-                        message.channel.send({ embeds: [new EmbedBuilder().setTitle('✅ Başarılı').setColor(0x57F287).setDescription(`**${guildName}** sunucusunda \`${word}\` kelimesi başarıyla yasaklandı!`)] });
+                        interaction.channel.send({ embeds: [new EmbedBuilder().setTitle('✅ Başarılı').setColor(0x57F287).setDescription(`**${guildName}** sunucusunda \`${word}\` kelimesi başarıyla yasaklandı!`)] });
                     } else {
-                        message.channel.send('⏱️ Süre doldu, kelime alınamadı.');
+                        interaction.channel.send('⏱️ Süre doldu, kelime alınamadı.');
                     }
                 } catch (err) {
                     console.error('[SETUP COLLECTOR]', err);
