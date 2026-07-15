@@ -71,7 +71,7 @@ const FALLBACK_INSTANCES = [
     'https://inv.thepixora.com'
 ];
 
-async function fetchWithTimeout(url, ms = 8000) {
+async function fetchWithTimeout(url, ms = 80000) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), ms);
     try {
