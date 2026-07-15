@@ -22,24 +22,37 @@ require('dotenv').config();
 // kullanılıyor, böylece "sign in to confirm you're not a bot"
 // hatası hiç oluşmuyor. Tek sunucuya güvenmek yerine birden
 // fazla sunucu denenir çünkü public instance'lar sık kesintiye uğrar.
+// NOT: 2026'da YouTube'un baskısı yüzünden public instance sayısı
+// azaldı; bazıları da CAPTCHA/bot-koruması eklemiş durumda. Bu yüzden
+// bu yöntem de %100 garanti değil, ama en güncel resmi listeyi kullanıyoruz.
 // ==========================================
 let cachedInstances = null;
 let cachedInstancesTime = 0;
 
 const FALLBACK_INSTANCES = [
     'https://inv.nadeko.net',
-    'https://yewtu.be',
-    'https://invidious.jing.rocks',
-    'https://invidious.f5.si',
-    'https://iv.ggtyler.dev'
+    'https://invidious.nerdvpn.de',
+    'https://yt.chocolatemoo53.com',
+    'https://invidious.tiekoetter.com',
+    'https://inv.thepixora.com'
 ];
+
+async function fetchWithTimeout(url, ms = 8000) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), ms);
+    try {
+        return await fetch(url, { signal: controller.signal });
+    } finally {
+        clearTimeout(timeout);
+    }
+}
 
 async function getInvidiousInstances() {
     if (cachedInstances && Date.now() - cachedInstancesTime < 10 * 60 * 1000) {
         return cachedInstances;
     }
     try {
-        const res = await fetch('https://api.invidious.io/instances.json?sort_by=health');
+        const res = await fetchWithTimeout('https://api.invidious.io/instances.json?sort_by=health');
         const data = await res.json();
         const healthy = data
             .filter(([, info]) => info.type === 'https' && info.api === true && info.uri)
@@ -51,7 +64,7 @@ async function getInvidiousInstances() {
             return cachedInstances;
         }
     } catch (e) {
-        console.error('[INVIDIOUS] Instance listesi alınamadı:', e.message);
+        console.error(`[INVIDIOUS] Instance listesi alınamadı: ${e.message} (cause: ${e.cause?.code || e.cause?.message || 'yok'})`);
     }
     return FALLBACK_INSTANCES;
 }
@@ -64,7 +77,7 @@ async function withInvidiousFallback(taskFn) {
         try {
             return await taskFn(instance);
         } catch (e) {
-            console.error(`[INVIDIOUS] ${instance} başarısız: ${e.message}`);
+            console.error(`[INVIDIOUS] ${instance} başarısız: ${e.message} (cause: ${e.cause?.code || e.cause?.message || 'yok'})`);
             lastError = e;
         }
     }
@@ -85,7 +98,7 @@ async function getSpotifyTrackName(url) {
 }
 
 async function invidiousSearch(instance, query) {
-    const res = await fetch(`${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=video`);
+    const res = await fetchWithTimeout(`${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=video`);
     if (!res.ok) throw new Error(`Invidious araması başarısız oldu (HTTP ${res.status}).`);
     const results = await res.json();
     if (!results || results.length === 0) throw new Error('Şarkı bulunamadı.');
@@ -93,7 +106,7 @@ async function invidiousSearch(instance, query) {
 }
 
 async function getInvidiousAudioInfo(instance, videoId) {
-    const res = await fetch(`${instance}/api/v1/videos/${videoId}`);
+    const res = await fetchWithTimeout(`${instance}/api/v1/videos/${videoId}`);
     if (!res.ok) throw new Error(`Video bilgisi alınamadı (HTTP ${res.status}).`);
     const data = await res.json();
     const audioFormats = (data.adaptiveFormats || []).filter(f => f.type && f.type.startsWith('audio'));
