@@ -1,10 +1,12 @@
 const { 
     Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder, 
-    StringSelectMenuBuilder, StringSelectMenuOptionBuilder, ComponentType, ChannelType 
+    StringSelectMenuBuilder, StringSelectMenuOptionBuilder, ComponentType, 
+    ChannelType, PermissionsBitField 
 } = require('discord.js');
 const http = require('http');
 require('dotenv').config();
 
+// Render'ı aktif tutmak için
 http.createServer((req, res) => {
     res.writeHead(200);
     res.end('Bot aktif!');
@@ -24,46 +26,49 @@ const client = new Client({
     ]
 });
 
+// Veritabanı (Sunucu ID -> Yasaklı Kelimeler Listesi)
 const serverBannedWords = new Map();
 
 client.once('ready', () => {
-    console.log(`${client.user.tag} başarıyla giriş yaptı!`);
+    console.log(`${client.user.tag} başarıyla giriş yaptı! | Rizza & Emoc Sistemleri Aktif.`);
 });
 
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
 
-    // 🔍 GİZLİ RADAR: Botun Dm'leri duyup duymadığını Render panelinde (Logs) görmek için
+    // DM Gelen Kutusu Radarı (Konsol takibi için)
     if (message.channel.type === ChannelType.DM) {
         console.log(`[DM ALINDI] Kimden: ${message.author.username} | Mesaj: ${message.content}`);
     }
 
-    const icerik = message.content.trim().toLowerCase(); // Boşlukları sil ve küçük harfe çevir
+    const args = message.content.trim().split(/ +/);
+    const command = args.shift().toLowerCase();
 
-    // --- /help veya !help KOMUTU ---
-    if (icerik === '/help' || icerik === '!help') {
+    // ==========================================
+    // 1. GENEL KOMUTLAR
+    // ==========================================
+
+    if (command === '/help' || command === '!help') {
         const helpEmbed = new EmbedBuilder()
             .setTitle('✨ Evo-Bot Yardım Merkezi ✨')
             .setColor(0x2b2d31)
-            .setDescription('Aşağıdaki komutları kullanarak botu yönetebilirsiniz.')
+            .setDescription('Botu yönetmek için aşağıdaki komutları kullanabilirsiniz.')
             .addFields(
-                { name: '🛠️ `!help`', value: 'Bu yardım menüsünü görüntüler.', inline: false },
-                { name: '📊 `!dashboard`', value: 'Botun sistem durumunu ve bilgilerini gösterir.', inline: false },
-                { name: '🛡️ `!setup`', value: '*(Sadece DM)* Sunucun için kelime engelleyiciyi kurar.', inline: false }
+                { name: '🛠️ Genel Komutlar', value: '`!help`, `!dashboard`, `!avatar`, `!serverinfo`', inline: false },
+                { name: '🛡️ Moderasyon (Yetki Gerekir)', value: '`!clear <sayı>`, `!kick @kişi`, `!ban @kişi`', inline: false },
+                { name: '⚙️ Kurulum (Sadece DM)', value: '`!setup` - Kelime engelleyiciyi kurar.', inline: false }
             )
             .setThumbnail(client.user.displayAvatarURL())
             .setFooter({ text: 'Rizza ve Emoc tarafından gururla geliştirildi.', iconURL: message.author.displayAvatarURL() })
             .setTimestamp();
-        message.reply({ embeds: [helpEmbed] });
+        return message.reply({ embeds: [helpEmbed] });
     }
 
-    // --- /dashboard veya !dashboard KOMUTU ---
-    if (icerik === '/dashboard' || icerik === '!dashboard') {
+    if (command === '/dashboard' || command === '!dashboard') {
         const dashboardEmbed = new EmbedBuilder()
             .setTitle('🚀 Sistem Kontrol Paneli')
             .setColor(0x5865F2)
             .setThumbnail(client.user.displayAvatarURL())
-            .setDescription(`Merhaba, ben **${client.user.username}**! Sistemlerim stabil çalışıyor.`)
             .addFields(
                 { name: '📡 Gecikme', value: `${client.ws.ping}ms`, inline: true },
                 { name: '⏱️ Durum', value: '7/24 Aktif', inline: true },
@@ -72,11 +77,82 @@ client.on('messageCreate', async (message) => {
             )
             .setFooter({ text: 'Render & GitHub üzerinden desteklenmektedir.' })
             .setTimestamp();
-        message.reply({ embeds: [dashboardEmbed] });
+        return message.reply({ embeds: [dashboardEmbed] });
     }
 
-    // --- /setup veya !setup KOMUTU (DM'den) ---
-    if (message.channel.type === ChannelType.DM && (icerik === '/setup' || icerik === '!setup')) {
+    if (command === '!serverinfo') {
+        if (message.channel.type === ChannelType.DM) return message.reply("Bu komut sadece sunucularda çalışır.");
+        const infoEmbed = new EmbedBuilder()
+            .setTitle(`${message.guild.name} | Sunucu Bilgileri`)
+            .setColor(0x00FFFF)
+            .setThumbnail(message.guild.iconURL({ dynamic: true }))
+            .addFields(
+                { name: '👑 Sunucu Sahibi', value: `<@${message.guild.ownerId}>`, inline: true },
+                { name: '👥 Üye Sayısı', value: `${message.guild.memberCount}`, inline: true },
+                { name: '📅 Kuruluş Tarihi', value: `<t:${Math.floor(message.guild.createdTimestamp / 1000)}:D>`, inline: true }
+            );
+        return message.reply({ embeds: [infoEmbed] });
+    }
+
+    if (command === '!avatar') {
+        const user = message.mentions.users.first() || message.author;
+        const avatarEmbed = new EmbedBuilder()
+            .setTitle(`${user.username} adlı kişinin profil resmi`)
+            .setColor(0xFF69B4)
+            .setImage(user.displayAvatarURL({ dynamic: true, size: 1024 }));
+        return message.reply({ embeds: [avatarEmbed] });
+    }
+
+    // ==========================================
+    // 2. MODERASYON KOMUTLARI (YETKİ GEREKTİRİR)
+    // ==========================================
+
+    if (command === '!clear') {
+        if (message.channel.type === ChannelType.DM) return;
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
+            return message.reply("❌ Bu komutu kullanmak için `Mesajları Yönet` yetkisine sahip olmalısın.");
+        }
+        const amount = parseInt(args[0]);
+        if (isNaN(amount) || amount < 1 || amount > 100) {
+            return message.reply("Lütfen 1 ile 100 arasında bir sayı belirtin. Örnek: `!clear 10`");
+        }
+        await message.channel.bulkDelete(amount, true).catch(err => console.log(err));
+        const successMsg = await message.channel.send(`✅ **${amount}** mesaj başarıyla silindi.`);
+        setTimeout(() => successMsg.delete().catch(() => {}), 3000);
+        return;
+    }
+
+    if (command === '!kick') {
+        if (message.channel.type === ChannelType.DM) return;
+        if (!message.member.permissions.has(PermissionsBitField.Flags.KickMembers)) {
+            return message.reply("❌ Bu komutu kullanmak için `Üyeleri At` yetkisine sahip olmalısın.");
+        }
+        const target = message.mentions.members.first();
+        if (!target) return message.reply("Lütfen atılacak kişiyi etiketleyin. Örnek: `!kick @kişi`");
+        if (!target.kickable) return message.reply("❌ Bu kişiyi atamam. Yetkim ondan düşük olabilir.");
+        
+        await target.kick(`Tarafından atıldı: ${message.author.tag}`);
+        return message.reply(`✅ **${target.user.tag}** sunucudan atıldı.`);
+    }
+
+    if (command === '!ban') {
+        if (message.channel.type === ChannelType.DM) return;
+        if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) {
+            return message.reply("❌ Bu komutu kullanmak için `Üyeleri Yasakla` yetkisine sahip olmalısın.");
+        }
+        const target = message.mentions.members.first();
+        if (!target) return message.reply("Lütfen yasaklanacak kişiyi etiketleyin. Örnek: `!ban @kişi`");
+        if (!target.bannable) return message.reply("❌ Bu kişiyi yasaklayamam. Yetkim ondan düşük olabilir.");
+        
+        await target.ban({ reason: `Tarafından yasaklandı: ${message.author.tag}` });
+        return message.reply(`🔨 **${target.user.tag}** sunucudan kalıcı olarak yasaklandı.`);
+    }
+
+    // ==========================================
+    // 3. SETUP KOMUTU (SADECE DM)
+    // ==========================================
+
+    if (message.channel.type === ChannelType.DM && (command === '/setup' || command === '!setup')) {
         const guilds = client.guilds.cache.filter(g => g.ownerId === message.author.id);
         
         if (guilds.size === 0) {
@@ -114,7 +190,7 @@ client.on('messageCreate', async (message) => {
             if (collected.size > 0) {
                 const word = collected.first().content.toLowerCase();
                 const list = serverBannedWords.get(guildId) || [];
-                list.push(word);
+                if (!list.includes(word)) list.push(word);
                 serverBannedWords.set(guildId, list);
                 
                 message.channel.send({ embeds: [new EmbedBuilder().setTitle('✅ Başarılı').setColor(0x57F287).setDescription(`**${guildName}** sunucusunda \`${word}\` kelimesi yasaklandı!`)] });
@@ -122,7 +198,10 @@ client.on('messageCreate', async (message) => {
         });
     }
 
-    // --- KÜFÜR ENGELLEME MANTIĞI ---
+    // ==========================================
+    // 4. KÜFÜR ENGELLEME RADARI (SUNUCU İÇİ)
+    // ==========================================
+
     if (message.guild && serverBannedWords.has(message.guild.id)) {
         const bannedWords = serverBannedWords.get(message.guild.id);
         const content = message.content.toLowerCase();
@@ -137,3 +216,4 @@ client.on('messageCreate', async (message) => {
 });
 
 client.login(process.env.DISCORD_TOKEN);
+//popo
