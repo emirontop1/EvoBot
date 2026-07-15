@@ -11,58 +11,44 @@ const express = require('express');
 require('dotenv').config();
 
 // ==========================================
-// WARP VPN (Cloudflare WARP) PROXY AYARI
+// MÜZİK KAYNAĞI 1 (BİRİNCİL): yt-dlp + Android Bypass
 // ==========================================
-const WARP_PROXY_URL = process.env.WARP_PROXY || 'socks5://127.0.0.1:40000';
-
-// ==========================================
-// MÜZİK KAYNAĞI 1 (BİRİNCİL): yt-dlp
-// ==========================================
-async function executeYtDlp(target, useProxy) {
-    const options = {
-        dumpSingleJson: true,
-        noCheckCertificates: true,
-        noWarnings: true,
-        preferFreeFormats: true,
-        format: 'bestaudio/best',
-        addHeader: ['referer:youtube.com', 'user-agent:googlebot']
-    };
-
-    if (useProxy) {
-        options.proxy = WARP_PROXY_URL;
-    }
-
-    return await youtubedl(target, options);
-}
-
 async function getAudioViaYtDlp(query) {
     const isUrl = /^https?:\/\//.test(query);
     const target = isUrl ? query : `ytsearch1:${query}`;
-    let output;
 
     try {
-        // Önce WARP VPN ile dene
-        output = await executeYtDlp(target, true);
-    } catch (proxyError) {
-        console.error(`[YT-DLP] Proxy başarısız oldu (${proxyError.message}). Proxy'siz deneniyor...`);
-        // Proxy yoksa veya çöktüyse normal bağlantıyı dene
-        output = await executeYtDlp(target, false);
+        // YOUTUBE BOT KORUMASINI AŞMAK İÇİN MOBİL İSTEMCİ BYPASS AYARLARI
+        const output = await youtubedl(target, {
+            dumpSingleJson: true,
+            noCheckCertificates: true,
+            noWarnings: true,
+            preferFreeFormats: true,
+            format: 'bestaudio/best',
+            extractorArgs: 'youtube:player_client=android,web_creator', // Bot engelini aşan kritik ayar
+            addHeader: [
+                'referer:https://m.youtube.com',
+                'user-agent:Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36'
+            ]
+        });
+
+        const info = (output && Array.isArray(output.entries)) ? output.entries[0] : output;
+        if (!info || !info.url) throw new Error('yt-dlp ses akışı bulamadı.');
+
+        const thumb = info.thumbnail || (Array.isArray(info.thumbnails) && info.thumbnails.length > 0
+            ? info.thumbnails[info.thumbnails.length - 1].url
+            : null);
+
+        return {
+            title: info.title || 'Bilinmeyen şarkı',
+            url: info.webpage_url || info.original_url || (info.id ? `https://www.youtube.com/watch?v=${info.id}` : target),
+            audioUrl: info.url,
+            durationRaw: formatDuration(info.duration),
+            thumbnail: thumb
+        };
+    } catch (error) {
+        throw new Error(`yt-dlp Hatası: ${error.message}`);
     }
-
-    const info = (output && Array.isArray(output.entries)) ? output.entries[0] : output;
-    if (!info || !info.url) throw new Error('yt-dlp ses akışı bulamadı.');
-
-    const thumb = info.thumbnail || (Array.isArray(info.thumbnails) && info.thumbnails.length > 0
-        ? info.thumbnails[info.thumbnails.length - 1].url
-        : null);
-
-    return {
-        title: info.title || 'Bilinmeyen şarkı',
-        url: info.webpage_url || info.original_url || (info.id ? `https://www.youtube.com/watch?v=${info.id}` : target),
-        audioUrl: info.url,
-        durationRaw: formatDuration(info.duration),
-        thumbnail: thumb
-    };
 }
 
 // ==========================================
@@ -71,19 +57,15 @@ async function getAudioViaYtDlp(query) {
 let cachedInstances = null;
 let cachedInstancesTime = 0;
 
-// Genişletilmiş ve güncel Invidious sunucu listesi (HTTP 502 almamak için)
 const FALLBACK_INSTANCES = [
-    'https://invidious.flokinet.to',
+    'https://invidious.projectsegfau.lt',
+    'https://invidious.privacyredirect.com',
     'https://inv.tux.pizza',
-    'https://invidious.lidarshield.cloud',
-    'https://inv.nadeko.net',
-    'https://invidious.nerdvpn.de',
-    'https://yt.chocolatemoo53.com',
-    'https://invidious.tiekoetter.com',
-    'https://inv.thepixora.com'
+    'https://invidious.drgns.space',
+    'https://invidious.protokolla.fi'
 ];
 
-async function fetchWithTimeout(url, ms = 20000) {
+async function fetchWithTimeout(url, ms = 15000) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), ms);
     try {
@@ -99,6 +81,7 @@ async function getInvidiousInstances() {
     }
     try {
         const res = await fetchWithTimeout('https://api.invidious.io/instances.json?sort_by=health');
+        if (!res.ok) throw new Error('API ulaşılamaz durumda.');
         const data = await res.json();
         const healthy = data
             .filter(([, info]) => info.type === 'https' && info.api === true && info.uri)
@@ -109,7 +92,7 @@ async function getInvidiousInstances() {
             return cachedInstances;
         }
     } catch (e) {
-        console.error(`[INVIDIOUS] Instance listesi alınamadı: ${e.message}`);
+        console.error(`[INVIDIOUS] Liste alınamadı, sabit liste kullanılıyor: ${e.message}`);
     }
     return FALLBACK_INSTANCES;
 }
@@ -121,11 +104,11 @@ async function withInvidiousFallback(taskFn) {
         try {
             return await taskFn(instance);
         } catch (e) {
-            console.error(`[INVIDIOUS] ${instance} başarısız: ${e.message}`);
+            console.error(`[INVIDIOUS] ${instance} başarısız oldu: HTTP/Fetch Hatası.`);
             lastError = e;
         }
     }
-    throw lastError || new Error('Hiçbir Invidious sunucusuna ulaşılamadı veya sunucular HTTP 502/503 hatası veriyor.');
+    throw lastError || new Error('Tüm Invidious sunucuları YouTube tarafından engellenmiş veya çevrimdışı.');
 }
 
 function extractYoutubeId(url) {
@@ -142,7 +125,7 @@ async function getSpotifyTrackName(url) {
 
 async function invidiousSearch(instance, query) {
     const res = await fetchWithTimeout(`${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=video`);
-    if (!res.ok) throw new Error(`Invidious araması başarısız oldu (HTTP ${res.status}).`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const results = await res.json();
     if (!results || results.length === 0) throw new Error('Şarkı bulunamadı.');
     return results[0];
@@ -150,7 +133,7 @@ async function invidiousSearch(instance, query) {
 
 async function getInvidiousAudioInfo(instance, videoId) {
     const res = await fetchWithTimeout(`${instance}/api/v1/videos/${videoId}`);
-    if (!res.ok) throw new Error(`Video bilgisi alınamadı (HTTP ${res.status}).`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     const audioFormats = (data.adaptiveFormats || []).filter(f => f.type && f.type.startsWith('audio'));
     if (audioFormats.length === 0) throw new Error('Ses akışı bulunamadı.');
@@ -193,7 +176,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-    res.send('EvoBot 7/24 Aktif! Üç Kademeli Bağlantı Sistemi Devrede.');
+    res.send('EvoBot 7/24 Aktif! IP Ban Koruması Devrede.');
 });
 
 app.listen(PORT, () => {
@@ -374,9 +357,11 @@ client.on(Events.MessageCreate, async (message) => {
 
                 let audioInfo;
                 try {
+                    // Ana plan: Android bypass ile ytdlp
                     audioInfo = await getAudioViaYtDlp(ytDlpQuery);
                 } catch (ytdlpErr) {
-                    console.error(`[YT-DLP] Tamamen başarısız, Invidious'a düşülüyor: ${ytdlpErr.message}`);
+                    console.error(`[YT-DLP] Ana plan başarısız: ${ytdlpErr.message}. Invidious'a düşülüyor...`);
+                    // Yedek plan: Invidious
                     audioInfo = await withInvidiousFallback(async (instance) => {
                         if (ytId) {
                             return await getInvidiousAudioInfo(instance, ytId);
