@@ -20,15 +20,23 @@ require('dotenv').config();
 // MÜZİK KAYNAĞI: INVIDIOUS (ücretsiz, cookie/hesap gerektirmez)
 // play-dl yerine YouTube'un önündeki açık kaynak Invidious ağı
 // kullanılıyor, böylece "sign in to confirm you're not a bot"
-// hatası hiç oluşmuyor.
+// hatası hiç oluşmuyor. Tek sunucuya güvenmek yerine birden
+// fazla sunucu denenir çünkü public instance'lar sık kesintiye uğrar.
 // ==========================================
-let cachedInvidiousInstance = null;
-let cachedInstanceTime = 0;
+let cachedInstances = null;
+let cachedInstancesTime = 0;
 
-async function getInvidiousInstance() {
-    // 10 dakikada bir tazele, her seferinde sorgulama
-    if (cachedInvidiousInstance && Date.now() - cachedInstanceTime < 10 * 60 * 1000) {
-        return cachedInvidiousInstance;
+const FALLBACK_INSTANCES = [
+    'https://inv.nadeko.net',
+    'https://yewtu.be',
+    'https://invidious.jing.rocks',
+    'https://invidious.f5.si',
+    'https://iv.ggtyler.dev'
+];
+
+async function getInvidiousInstances() {
+    if (cachedInstances && Date.now() - cachedInstancesTime < 10 * 60 * 1000) {
+        return cachedInstances;
     }
     try {
         const res = await fetch('https://api.invidious.io/instances.json?sort_by=health');
@@ -37,15 +45,30 @@ async function getInvidiousInstance() {
             .filter(([, info]) => info.type === 'https' && info.api === true && info.uri)
             .map(([, info]) => info.uri);
         if (healthy.length > 0) {
-            cachedInvidiousInstance = healthy[0];
-            cachedInstanceTime = Date.now();
-            return cachedInvidiousInstance;
+            // Bilinen sabit yedekleri de listenin sonuna ekle
+            cachedInstances = [...new Set([...healthy.slice(0, 6), ...FALLBACK_INSTANCES])];
+            cachedInstancesTime = Date.now();
+            return cachedInstances;
         }
     } catch (e) {
         console.error('[INVIDIOUS] Instance listesi alınamadı:', e.message);
     }
-    // Bilinen bir yedek instance
-    return 'https://inv.nadeko.net';
+    return FALLBACK_INSTANCES;
+}
+
+// Birden fazla instance'ı sırayla dener, ilk başarılı olanı kullanır
+async function withInvidiousFallback(taskFn) {
+    const instances = await getInvidiousInstances();
+    let lastError;
+    for (const instance of instances) {
+        try {
+            return await taskFn(instance);
+        } catch (e) {
+            console.error(`[INVIDIOUS] ${instance} başarısız: ${e.message}`);
+            lastError = e;
+        }
+    }
+    throw lastError || new Error('Hiçbir Invidious sunucusuna ulaşılamadı.');
 }
 
 function extractYoutubeId(url) {
@@ -63,7 +86,7 @@ async function getSpotifyTrackName(url) {
 
 async function invidiousSearch(instance, query) {
     const res = await fetch(`${instance}/api/v1/search?q=${encodeURIComponent(query)}&type=video`);
-    if (!res.ok) throw new Error('Invidious araması başarısız oldu.');
+    if (!res.ok) throw new Error(`Invidious araması başarısız oldu (HTTP ${res.status}).`);
     const results = await res.json();
     if (!results || results.length === 0) throw new Error('Şarkı bulunamadı.');
     return results[0]; // { videoId, title, author, videoThumbnails, lengthSeconds, ... }
@@ -71,7 +94,7 @@ async function invidiousSearch(instance, query) {
 
 async function getInvidiousAudioInfo(instance, videoId) {
     const res = await fetch(`${instance}/api/v1/videos/${videoId}`);
-    if (!res.ok) throw new Error('Video bilgisi alınamadı.');
+    if (!res.ok) throw new Error(`Video bilgisi alınamadı (HTTP ${res.status}).`);
     const data = await res.json();
     const audioFormats = (data.adaptiveFormats || []).filter(f => f.type && f.type.startsWith('audio'));
     if (audioFormats.length === 0) throw new Error('Ses akışı bulunamadı.');
@@ -83,6 +106,7 @@ async function getInvidiousAudioInfo(instance, videoId) {
         audioUrl: audioFormats[0].url,
         durationRaw: formatDuration(data.lengthSeconds),
         thumbnail: data.videoThumbnails && data.videoThumbnails.length > 0 ? data.videoThumbnails[0].url : null
+
     };
 }
 
@@ -285,7 +309,6 @@ client.on(Events.MessageCreate, async (message) => {
 
                 const loadingMsg = await message.reply("🔎 Şarkı aranıyor ve yükleniyor, lütfen bekleyin...");
 
-                const instance = await getInvidiousInstance();
                 let searchQuery = query;
 
                 if (query.includes('spotify.com')) {
@@ -293,14 +316,15 @@ client.on(Events.MessageCreate, async (message) => {
                     searchQuery = await getSpotifyTrackName(query);
                 }
 
-                let audioInfo;
                 const ytId = extractYoutubeId(query);
-                if (ytId) {
-                    audioInfo = await getInvidiousAudioInfo(instance, ytId);
-                } else {
-                    const found = await invidiousSearch(instance, searchQuery);
-                    audioInfo = await getInvidiousAudioInfo(instance, found.videoId);
-                }
+                const audioInfo = await withInvidiousFallback(async (instance) => {
+                    if (ytId) {
+                        return await getInvidiousAudioInfo(instance, ytId);
+                    } else {
+                        const found = await invidiousSearch(instance, searchQuery);
+                        return await getInvidiousAudioInfo(instance, found.videoId);
+                    }
+                });
 
                 const ffmpegStream = createFfmpegAudioStream(audioInfo.audioUrl);
                 const resource = createAudioResource(ffmpegStream, { inputType: StreamType.Raw });
