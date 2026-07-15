@@ -26,7 +26,7 @@ const client = new Client({
         GatewayIntentBits.GuildMessages, 
         GatewayIntentBits.MessageContent, 
         GatewayIntentBits.GuildMembers,
-        GatewayIntentBits.GuildVoiceStates, // Ses kanallarına bağlanmak için ZORUNLU İNTENT
+        GatewayIntentBits.GuildVoiceStates,
         GatewayIntentBits.DirectMessages 
     ],
     partials: [
@@ -86,7 +86,7 @@ client.on(Events.MessageCreate, async (message) => {
             .setDescription('Sistemleri yönetmek için kullanabileceğiniz komutlar:')
             .addFields(
                 { name: '🛠️ Genel', value: '`!help`, `!dashboard`, `!avatar`, `!serverinfo`, `!userinfo`', inline: false },
-                { name: '🎵 Müzik', value: '`!spawn <şarkı adı veya linki>`, `!ayril`', inline: false },
+                { name: '🎵 Müzik', value: '`!spawn <şarkı adı veya link>`, `!ayril`', inline: false },
                 { name: '🛡️ Moderasyon (Yetki Gerekir)', value: '`!clear <sayı>`, `!kick @üye`, `!ban @üye`', inline: false },
                 { name: '⚙️ Kurulum (Sadece DM)', value: '`!setup` - Kelime engelleyici kurulumunu başlatır.', inline: false }
             )
@@ -179,22 +179,28 @@ client.on(Events.MessageCreate, async (message) => {
             const loadingMsg = await message.reply("🔎 Şarkı aranıyor ve yükleniyor, lütfen bekleyin...");
             
             let ytInfo;
-            // Eğer spotify linkiyse ismini alıp YouTube'da aratır (Tokensiz yöntem)
+            let stream;
+
+            // URL ve kelime kontrolü ayrıştırıldı
             if (query.includes('spotify.com')) {
                 const sp_data = await play.spotify(query);
                 const search = await play.search(`${sp_data.name} ${sp_data.artists[0]?.name}`, { limit: 1 });
+                if (!search || search.length === 0) throw new Error("Şarkı bulunamadı.");
                 ytInfo = search[0];
+                stream = await play.stream(ytInfo.url);
+            } else if (query.includes('youtube.com') || query.includes('youtu.be')) {
+                // Doğrudan YT linki atılırsa search değil video_info kullanılır
+                const info = await play.video_info(query);
+                ytInfo = info.video_details;
+                stream = await play.stream(query);
             } else {
+                // Sadece şarkı ismi yazılırsa search kullanılır
                 const search = await play.search(query, { limit: 1 });
+                if (!search || search.length === 0) throw new Error("Şarkı bulunamadı.");
                 ytInfo = search[0];
+                stream = await play.stream(ytInfo.url);
             }
 
-            if (!ytInfo) {
-                connection.destroy();
-                return loadingMsg.edit("❌ Şarkı bulunamadı.");
-            }
-
-            const stream = await play.stream(ytInfo.url);
             const resource = createAudioResource(stream.stream, { inputType: stream.type });
             const player = createAudioPlayer();
 
@@ -202,28 +208,35 @@ client.on(Events.MessageCreate, async (message) => {
             connection.subscribe(player);
 
             player.on(AudioPlayerStatus.Idle, () => {
-                connection.destroy(); // Şarkı bitince otomatik ayrılır
+                connection.destroy();
             });
+
+            player.on('error', error => {
+                console.error('Ses Oynatıcı Hatası:', error);
+                connection.destroy();
+            });
+
+            const thumbnail = ytInfo.thumbnails && ytInfo.thumbnails.length > 0 ? ytInfo.thumbnails[0].url : null;
 
             const playEmbed = new EmbedBuilder()
                 .setTitle('🎶 Müzik Başladı!')
                 .setColor(0x5865F2)
                 .setDescription(`**[${ytInfo.title}](${ytInfo.url})**`)
-                .setThumbnail(ytInfo.thumbnails[0]?.url)
+                .setThumbnail(thumbnail)
                 .addFields(
                     { name: 'Kanal', value: `${voiceChannel.name}`, inline: true },
-                    { name: 'Süre', value: `${ytInfo.durationRaw}`, inline: true }
+                    { name: 'Süre', value: `${ytInfo.durationRaw || 'Bilinmiyor'}`, inline: true }
                 )
                 .setFooter({ text: `İsteyen: ${message.author.tag}`, iconURL: message.author.displayAvatarURL() })
                 .setTimestamp();
             
-            await loadingMsg.delete();
+            await loadingMsg.delete().catch(() => {});
             return message.channel.send({ embeds: [playEmbed] });
 
         } catch (error) {
-            console.error(error);
+            console.error("Müzik Hatası:", error);
             connection.destroy();
-            return message.reply("❌ Şarkı çalınırken bir hata oluştu. Linkin veya aramanın doğru olduğundan emin olun.");
+            return message.reply("❌ Şarkı çalınırken bir hata oluştu veya link hatalı.");
         }
     }
 
