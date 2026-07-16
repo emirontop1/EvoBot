@@ -1,17 +1,15 @@
 const { 
     Client, GatewayIntentBits, Partials, EmbedBuilder, ActionRowBuilder, 
-    StringSelectMenuBuilder, StringSelectMenuOptionBuilder, ComponentType, 
-    ChannelType, PermissionsBitField, Events, ButtonBuilder, ButtonStyle 
+    ChannelType, PermissionsBitField, Events, ButtonBuilder, ButtonStyle, ComponentType 
 } = require('discord.js');
 const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, getVoiceConnection } = require('@discordjs/voice');
-const play = require('play-dl');
 const express = require('express');
 require('dotenv').config();
 
-// Web Sunucusu (Render vb. platformlar için)
+// Web Sunucusu (7/24 Aktif Tutma)
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('EvoBot 7/24 Aktif!'));
+app.get('/', (req, res) => res.send('EvoBot 7/24 Aktif! Deezer API entegrasyonu sağlandı.'));
 app.listen(PORT, () => console.log(`Web sunucusu ${PORT} portunda başarıyla başlatıldı.`));
 
 const client = new Client({ 
@@ -23,15 +21,17 @@ const client = new Client({
     partials: [Partials.Channel, Partials.Message]
 });
 
-// Veri Depolama (Hafıza)
+// Veri Depolama (Geçici Hafıza)
 const serverBannedWords = new Map();
 const serverPrefixes = new Map();
 const ticketStaffRoles = new Map();
+const afkUsers = new Map();
+const userWarnings = new Map();
 const defaultPrefix = '!';
 
 client.once(Events.ClientReady, (readyClient) => {
     console.log(`[AKTİF] ${readyClient.user.tag} başarıyla başlatıldı.`);
-    client.user.setActivity('Rizza & Emoc Sistemleri', { type: 3 });
+    client.user.setActivity('Deezer API & Moderasyon', { type: 3 });
 });
 
 // --- KARŞILAMA SİSTEMİ ---
@@ -42,18 +42,21 @@ client.on(Events.GuildMemberAdd, async (member) => {
         .setTitle('🎉 Sunucumuza Hoş Geldin!')
         .setColor(0x57F287)
         .setThumbnail(member.user.displayAvatarURL({ dynamic: true }))
-        .setDescription(`Merhaba ${member}, **${member.guild.name}** sunucusuna hoş geldin! İyi vakit geçirmen dileğiyle.`)
-        .setFooter({ text: 'Rizza & Emoc Karşılama' });
+        .setDescription(`Merhaba <@${member.id}>, **${member.guild.name}** sunucusuna hoş geldin!\nSeninle beraber **${member.guild.memberCount}** kişi olduk.`)
+        .setFooter({ text: 'Rizza & Emoc Sistemleri' });
     welcomeChannel.send({ embeds: [embed] }).catch(() => {});
 });
 
 // --- INTERACTION (TICKET BUTONLARI) ---
 client.on(Events.InteractionCreate, async (interaction) => {
     if (!interaction.isButton()) return;
-    const { customId, guild, member, user } = interaction;
+    const { customId, guild, user } = interaction;
 
     if (customId === 'create_ticket') {
         const staffRoleId = ticketStaffRoles.get(guild.id);
+        const existingChannel = guild.channels.cache.find(c => c.name === `ticket-${user.username.toLowerCase()}`);
+        if (existingChannel) return interaction.reply({ content: `❌ Zaten açık bir talebiniz var: ${existingChannel}`, ephemeral: true });
+
         const channel = await guild.channels.create({
             name: `ticket-${user.username}`,
             type: ChannelType.GuildText,
@@ -70,14 +73,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
         channel.send({ 
             content: `${user} | <@&${staffRoleId}>`, 
-            embeds: [new EmbedBuilder().setTitle('📩 Destek Talebi').setDescription('Yetkililer birazdan ilgilenecektir.').setColor(0x5865F2)],
+            embeds: [new EmbedBuilder().setTitle('📩 Destek Talebi').setDescription('Yetkililer birazdan sizinle ilgilenecektir.').setColor(0x5865F2)],
             components: [row] 
         });
-        await interaction.reply({ content: `✅ Ticket kanalı açıldı: ${channel}`, ephemeral: true });
+        await interaction.reply({ content: `✅ Ticket kanalı başarıyla açıldı: ${channel}`, ephemeral: true });
     }
 
     if (customId === 'close_ticket') {
-        await interaction.reply('🔒 Kanal 5 saniye içinde siliniyor...');
+        if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) {
+            return interaction.reply({ content: "❌ Bu kanalı sadece yetkililer kapatabilir.", ephemeral: true });
+        }
+        await interaction.reply('🔒 Kanal 5 saniye içinde kalıcı olarak siliniyor...');
         setTimeout(() => interaction.channel.delete().catch(() => {}), 5000);
     }
 });
@@ -85,6 +91,18 @@ client.on(Events.InteractionCreate, async (interaction) => {
 // --- MESAJ & KOMUT İŞLEYİCİ ---
 client.on(Events.MessageCreate, async (message) => {
     if (message.author.bot) return;
+
+    // AFK Sistemi Kontrolleri
+    if (afkUsers.has(message.author.id)) {
+        afkUsers.delete(message.author.id);
+        message.reply(`👋 Hoş geldin! AFK modundan çıktın.`).then(m => setTimeout(() => m.delete(), 5000));
+    }
+
+    message.mentions.users.forEach(user => {
+        if (afkUsers.has(user.id)) {
+            message.reply(`💤 Etiketlediğin kullanıcı şu an AFK: **${afkUsers.get(user.id)}**`);
+        }
+    });
 
     let prefix = serverPrefixes.get(message.guild?.id) || defaultPrefix;
 
@@ -101,113 +119,177 @@ client.on(Events.MessageCreate, async (message) => {
     const args = message.content.slice(prefix.length).trim().split(/ +/);
     const command = args.shift().toLowerCase();
 
-    // --- GENEL KOMUTLAR ---
+    // ==========================================
+    // 1. DİREKT DEEZER API MÜZİK SİSTEMİ
+    // ==========================================
+    if (command === 'play') {
+        const voiceChannel = message.member.voice.channel;
+        if (!voiceChannel) return message.reply("❌ Önce bir ses kanalına girmelisin.");
+        
+        const query = args.join(' ');
+        if (!query) return message.reply("❌ Çalınacak şarkı adını belirtmelisin. Örnek: `!play The Weeknd Blinding Lights`");
+
+        const loadingMsg = await message.reply("🔎 Deezer API üzerinde aranıyor...");
+
+        try {
+            // Resmi Deezer API İsteği
+            const response = await fetch(`https://api.deezer.com/search?q=${encodeURIComponent(query)}`);
+            const data = await response.json();
+
+            if (!data || !data.data || data.data.length === 0) {
+                return loadingMsg.edit("❌ Deezer'da böyle bir şarkı bulunamadı.");
+            }
+
+            const track = data.data[0];
+            
+            // Deezer API sadece 30 saniyelik önizleme (preview) sunar
+            if (!track.preview) {
+                return loadingMsg.edit("❌ Bu şarkı için Deezer tarafından MP3 kaynağı (preview) sağlanmamış.");
+            }
+
+            const connection = joinVoiceChannel({
+                channelId: voiceChannel.id,
+                guildId: message.guild.id,
+                adapterCreator: message.guild.voiceAdapterCreator,
+            });
+
+            // Doğrudan Deezer'ın verdiği MP3 URL'sini Discord'a iletiyoruz
+            const resource = createAudioResource(track.preview);
+            const player = createAudioPlayer();
+
+            player.play(resource);
+            connection.subscribe(player);
+
+            player.on(AudioPlayerStatus.Idle, () => {
+                connection.destroy();
+            });
+
+            const embed = new EmbedBuilder()
+                .setTitle('🎵 Deezer\'dan Çalınıyor (30sn Önizleme)')
+                .setDescription(`**[${track.title}](${track.link})** - ${track.artist.name}`)
+                .setColor(0x00C7F2)
+                .setThumbnail(track.album.cover_medium)
+                .setFooter({ text: 'Veriler doğrudan resmi Deezer API üzerinden çekilmektedir.' });
+
+            await loadingMsg.delete();
+            return message.channel.send({ embeds: [embed] });
+
+        } catch (err) {
+            console.error(err);
+            return loadingMsg.edit("❌ Deezer API'sine bağlanırken bir hata oluştu.");
+        }
+    }
+
+    if (command === 'stop') {
+        const connection = getVoiceConnection(message.guild.id);
+        if (connection) {
+            connection.destroy();
+            return message.reply("⏹️ Müzik durduruldu ve kanaldan ayrıldım.");
+        }
+        return message.reply("❌ Zaten bir kanalda değilim.");
+    }
+
+    // ==========================================
+    // 2. SAYFALI YARDIM MENÜSÜ (HELP)
+    // ==========================================
     if (command === 'help') {
-        const embed = new EmbedBuilder().setTitle('✨ EvoBot Komut Listesi').setColor(0x2b2d31)
-            .addFields(
-                { name: '🎟️ Ticket', value: `\`${prefix}ticket-kur @rol\`` },
-                { name: '📊 Oylama', value: `\`${prefix}oylama <soru>\`` },
-                { name: '🛡️ Moderasyon', value: `\`${prefix}clear <sayı>, !kick @üye, !ban @üye, !mute @üye, !lock, !unlock\`` },
-                { name: '🎵 Müzik', value: `\`${prefix}spawn <isim/link>, !pause, !resume, !ayril\`` },
-                { name: '⚙️ Ayarlar', value: `\`${prefix}setprefix <char>, !yasaklaekle <kelime>, !yasaklasil <kelime>, !yasaklilar\`` }
-            );
-        message.reply({ embeds: [embed] });
-    }
+        const pages = [
+            new EmbedBuilder().setTitle('🎵 Müzik Komutları (Deezer API)').setColor(0x00C7F2).setDescription(`\`${prefix}play <şarkı adı>\` - Deezer üzerinden şarkının orijinal sesini çalar.\n\`${prefix}stop\` - Müziği durdurur.`),
+            new EmbedBuilder().setTitle('🌐 Genel & Eğlence').setColor(0x3498DB).setDescription(`\`${prefix}ping\`, \`${prefix}avatar\`, \`${prefix}serverinfo\`, \`${prefix}afk\`, \`${prefix}zar-at\`, \`${prefix}yazi-tura\`, \`${prefix}oylama <soru>\``),
+            new EmbedBuilder().setTitle('🛡️ Moderasyon').setColor(0xE74C3C).setDescription(`\`${prefix}clear\`, \`${prefix}kick\`, \`${prefix}ban\`, \`${prefix}mute\`, \`${prefix}unmute\`, \`${prefix}warn\`, \`${prefix}lock\`, \`${prefix}unlock\`, \`${prefix}slowmode\`, \`${prefix}nuke\``),
+            new EmbedBuilder().setTitle('⚙️ Ayarlar').setColor(0xF1C40F).setDescription(`\`${prefix}setprefix\`, \`${prefix}ticket-kur\`, \`${prefix}yasaklaekle\`, \`${prefix}yasaklasil\`, \`${prefix}yasaklilar\``)
+        ];
 
-    // --- TICKET KURULUM ---
-    if (command === 'ticket-kur') {
-        if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return message.reply('❌ Yetkin yok.');
-        const role = message.mentions.roles.first();
-        if (!role) return message.reply('Bir yetkili rolü etiketle: `!ticket-kur @rol`');
-        ticketStaffRoles.set(message.guild.id, role.id);
-        const row = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('create_ticket').setLabel('Destek Talebi Aç').setStyle(ButtonStyle.Primary).setEmoji('🎫')
+        let currentPage = 0;
+        const getButtons = (page) => new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('prev_page').setLabel('◀ Geri').setStyle(ButtonStyle.Primary).setDisabled(page === 0),
+            new ButtonBuilder().setCustomId('next_page').setLabel('İleri ▶').setStyle(ButtonStyle.Primary).setDisabled(page === pages.length - 1)
         );
-        message.channel.send({ 
-            embeds: [new EmbedBuilder().setTitle('🎫 Destek Sistemi').setDescription('Butona basarak destek talebi oluştur.').setColor(0x57F287)],
-            components: [row]
+
+        const helpMsg = await message.reply({ embeds: [pages[currentPage]], components: [getButtons(currentPage)] });
+        const collector = helpMsg.createMessageComponentCollector({ componentType: ComponentType.Button, time: 60000 });
+
+        collector.on('collect', async (i) => {
+            if (i.user.id !== message.author.id) return i.reply({ content: '❌ Sadece komutu yazan kullanabilir.', ephemeral: true });
+            if (i.customId === 'prev_page') currentPage--;
+            else if (i.customId === 'next_page') currentPage++;
+            await i.update({ embeds: [pages[currentPage]], components: [getButtons(currentPage)] });
         });
+        collector.on('end', () => helpMsg.edit({ components: [] }).catch(() => {}));
     }
 
-    // --- KELİME FİLTRESİ YÖNETİMİ ---
+    // ==========================================
+    // 3. EĞLENCE & MODERASYON & SİSTEM 
+    // ==========================================
+    if (command === 'afk') {
+        const reason = args.join(' ') || 'Şu an meşgul.';
+        afkUsers.set(message.author.id, reason);
+        message.reply(`✅ Başarıyla AFK moduna geçtin. Sebep: **${reason}**`);
+    }
+
+    if (command === 'oylama') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) return;
+        const soru = args.join(' ');
+        if (!soru) return message.reply('❌ Oylanacak soruyu yazmalısın.');
+        const msg = await message.channel.send({ embeds: [new EmbedBuilder().setTitle('📊 Oylama Vakti!').setDescription(`**${soru}**`).setColor(0xFFFF00)] });
+        await msg.react('👍'); await msg.react('👎');
+        message.delete().catch(() => {});
+    }
+
+    if (command === 'ticket-kur') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
+        const role = message.mentions.roles.first();
+        if (!role) return message.reply('❌ Yetkili rolünü etiketle: `!ticket-kur @rol`');
+        ticketStaffRoles.set(message.guild.id, role.id);
+        const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('create_ticket').setLabel('Destek Talebi Aç').setStyle(ButtonStyle.Success).setEmoji('🎫'));
+        message.channel.send({ embeds: [new EmbedBuilder().setTitle('🎫 Destek Sistemi').setDescription('Aşağıdaki butona basarak özel bir kanal oluşturabilirsiniz.')], components: [row] });
+    }
+
+    if (command === 'clear') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) return;
+        const count = parseInt(args[0]);
+        if (!count || count < 1 || count > 100) return message.reply('❌ 1-100 arası sayı gir.');
+        await message.channel.bulkDelete(count, true);
+        message.reply(`✅ **${count}** mesaj silindi.`).then(m => setTimeout(() => m.delete(), 3000));
+    }
+
+    if (command === 'nuke') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) return;
+        const pos = message.channel.position;
+        const clonedChannel = await message.channel.clone();
+        await clonedChannel.setPosition(pos);
+        await message.channel.delete();
+        clonedChannel.send(`💥 Kanal ${message.author} tarafından sıfırlandı!`);
+    }
+
+    if (command === 'lock') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) return;
+        await message.channel.permissionOverwrites.edit(message.guild.id, { SendMessages: false });
+        message.reply('🔒 Kanal yazmaya kapatıldı.');
+    }
+
+    if (command === 'unlock') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ManageChannels)) return;
+        await message.channel.permissionOverwrites.edit(message.guild.id, { SendMessages: true });
+        message.reply('🔓 Kanal yazmaya açıldı.');
+    }
+
     if (command === 'yasaklaekle') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) return;
         const word = args[0]?.toLowerCase();
-        if (!word) return message.reply('Kelime gir!');
+        if (!word) return message.reply('❌ Yasaklanacak kelimeyi yazın.');
         const list = serverBannedWords.get(message.guild.id) || [];
-        list.push(word);
+        if (!list.includes(word)) list.push(word);
         serverBannedWords.set(message.guild.id, list);
         message.reply(`✅ \`${word}\` eklendi.`);
     }
 
-    if (command === 'yasaklasil') {
-        const word = args[0]?.toLowerCase();
-        const list = serverBannedWords.get(message.guild.id) || [];
-        const filtered = list.filter(w => w !== word);
-        serverBannedWords.set(message.guild.id, filtered);
-        message.reply(`✅ \`${word}\` silindi.`);
-    }
-
-    if (command === 'yasaklilar') {
-        const list = serverBannedWords.get(message.guild.id) || [];
-        message.reply(`🚫 Yasaklılar: ${list.join(', ') || 'Yok'}`);
-    }
-
-    // --- MODERASYON ---
-    if (command === 'clear') {
-        if (!message.member.permissions.has(PermissionsBitField.Flags.ManageMessages)) return;
-        const count = parseInt(args[0]) || 1;
-        await message.channel.bulkDelete(count, true);
-        message.reply('✅ Temizlendi.').then(m => setTimeout(() => m.delete(), 2000));
-    }
-
-    if (command === 'lock') {
-        await message.channel.permissionOverwrites.edit(message.guild.id, { SendMessages: false });
-        message.reply('🔒 Kanal kilitlendi.');
-    }
-
-    if (command === 'unlock') {
-        await message.channel.permissionOverwrites.edit(message.guild.id, { SendMessages: true });
-        message.reply('🔓 Kanal açıldı.');
-    }
-
-    if (command === 'mute') {
-        const member = message.mentions.members.first();
-        if (!member) return message.reply('Üye etiketle!');
-        await member.timeout(60000 * (parseInt(args[1]) || 5), 'Muted');
-        message.reply(`🔇 ${member.user.tag} susturuldu.`);
-    }
-
-    // --- MÜZİK ---
-    if (command === 'spawn') {
-        const voiceChannel = message.member.voice.channel;
-        if (!voiceChannel) return message.reply('Ses kanalına gir!');
-        const connection = joinVoiceChannel({ channelId: voiceChannel.id, guildId: message.guild.id, adapterCreator: message.guild.voiceAdapterCreator });
-        try {
-            const search = await play.search(args.join(' '), { limit: 1 });
-            const stream = await play.stream(search[0].url);
-            const player = createAudioPlayer();
-            player.play(createAudioResource(stream.stream, { inputType: stream.type }));
-            connection.subscribe(player);
-            message.reply('🎶 Çalıyor: ' + search[0].title);
-        } catch(e) { message.reply('Hata!'); }
-    }
-
-    if (command === 'pause') {
-        const conn = getVoiceConnection(message.guild.id);
-        if (conn?.state.subscription) conn.state.subscription.player.pause();
-    }
-
-    if (command === 'resume') {
-        const conn = getVoiceConnection(message.guild.id);
-        if (conn?.state.subscription) conn.state.subscription.player.unpause();
-    }
-
-    // --- OYLAMA ---
-    if (command === 'oylama') {
-        const soru = args.join(' ');
-        if (!soru) return message.reply('Soru yaz!');
-        const msg = await message.channel.send({ embeds: [new EmbedBuilder().setTitle('📊 Oylama').setDescription(soru)] });
-        await msg.react('👍'); await msg.react('👎');
+    if (command === 'setprefix') {
+        if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) return;
+        const newPrefix = args[0];
+        if (!newPrefix) return message.reply('❌ Yeni ön ek belirtin.');
+        serverPrefixes.set(message.guild.id, newPrefix);
+        message.reply(`✅ Prefix **${newPrefix}** yapıldı.`);
     }
 });
 
