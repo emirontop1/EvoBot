@@ -11,6 +11,8 @@ require('dotenv').config();
 const app = express();
 app.get('/', (req, res) => res.send('EvoBot Tam Donanımlı Aktif! Ses sistemi düzeltildi.'));
 app.listen(process.env.PORT || 3000);
+const ffmpeg = require('ffmpeg-static');
+// ... diğer kodların ...
 
 const client = new Client({ 
     intents: [
