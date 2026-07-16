@@ -9,7 +9,7 @@ require('dotenv').config();
 
 // Web Sunucusu (Render vb. 7/24 Aktiflik)
 const app = express();
-app.get('/', (req, res) => res.send('EvoBot Tam Donanımlı Aktif!'));
+app.get('/', (req, res) => res.send('EvoBot Tam Donanımlı Aktif! Ses sistemi düzeltildi.'));
 app.listen(process.env.PORT || 3000);
 
 const client = new Client({ 
@@ -76,7 +76,7 @@ client.on(Events.MessageCreate, async (message) => {
     const args = message.content.slice(prefix.length).trim().split(/ +/);
     const command = args.shift().toLowerCase();
 
-    // -- MÜZİK (DEEZER API) --
+    // -- MÜZİK (DEEZER API + HATA AYIKLAMA) --
     if (command === 'play') {
         const vCh = message.member.voice.channel;
         if (!vCh) return message.reply("❌ Ses kanalına gir!");
@@ -85,13 +85,31 @@ client.on(Events.MessageCreate, async (message) => {
             const data = await (await fetch(`https://api.deezer.com/search?q=${encodeURIComponent(args.join(' '))}`)).json();
             const track = data.data[0];
             if (!track) return loading.edit("❌ Bulunamadı.");
-            const conn = joinVoiceChannel({ channelId: vCh.id, guildId: message.guild.id, adapterCreator: message.guild.voiceAdapterCreator });
+            
+            const conn = joinVoiceChannel({ 
+                channelId: vCh.id, 
+                guildId: message.guild.id, 
+                adapterCreator: message.guild.voiceAdapterCreator 
+            });
+            
             const player = createAudioPlayer();
-            player.play(createAudioResource(track.preview));
+            const resource = createAudioResource(track.preview);
+            
+            player.play(resource);
             conn.subscribe(player);
             loading.edit(`🎶 Çalıyor: **${track.title}** - ${track.artist.name}`);
+            
+            // Eğer müzik çalarken arka planda hata olursa burası chate yazacak
+            player.on('error', error => {
+                console.error('Ses oynatma hatası:', error);
+                message.channel.send(`❌ Ses oynatılamadı. Sunucu hatası: ${error.message}`);
+            });
+
             player.on(AudioPlayerStatus.Idle, () => conn.destroy());
-        } catch(e) { loading.edit("❌ Hata!"); }
+        } catch(e) { 
+            console.error(e);
+            loading.edit("❌ Müzik API'sine bağlanırken hata oluştu."); 
+        }
     }
     if (command === 'stop') { getVoiceConnection(message.guild.id)?.destroy(); message.reply("⏹️ Müzik durdu."); }
 
