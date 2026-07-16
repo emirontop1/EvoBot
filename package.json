@@ -1,20 +1,17 @@
 {
-  "name": "evobot-premium",
+  "name": "evobot",
   "version": "1.0.0",
-  "description": "EvoBot Premium Edition",
+  "description": "",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "discord.js": "latest",
-    "@discordjs/voice": "latest",
-    "discord-tts": "latest",
-    "express": "latest",
-    "node-fetch": "latest",
-    "dotenv": "latest",
-    "canvas": "latest",
-    "libsodium-wrappers": "latest",
-    "opusscript": "latest"
+    "@discordjs/voice": "^0.16.0",
+    "discord-tts": "^1.2.0",
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "node-fetch": "^2.7.0"
   }
 }
